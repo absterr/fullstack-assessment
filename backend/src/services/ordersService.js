@@ -80,7 +80,7 @@ async function createOrder({ customerId, items, totalAmount }) {
       }
 
       // Lock the row so concurrent transactions cannot read stale stock.
-      const product = await productsRepository.getProductById(
+      const product = await productsRepository.getProductByIdForUpdate(
         item.productId,
         client,
       );
@@ -156,7 +156,7 @@ async function chargeOrder({ idempotencyKey, orderId, requestingCustomerId }) {
   }
 
   return withTransaction(async (client) => {
-    const order = await ordersRepository.getOrderById(orderId, client);
+    const order = await ordersRepository.getOrderByIdForUpdate(orderId, client);
 
     if (!order) {
       const error = new Error("Order not found");
