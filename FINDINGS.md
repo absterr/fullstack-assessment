@@ -273,3 +273,85 @@ This document records all issues found in the `fullstack-assessment` codebase, o
 **Why not fixed here:** Sanitization belongs at the frontend render layer. React escapes text content by default; the risk is only present if `dangerouslySetInnerHTML` is used.
 
 **Recommendation:** Audit frontend rendering of product fields (see frontend findings).
+
+---
+
+## `backend/src/db/schema.sql`
+
+---
+
+### [FIXED] #25 · `payments.idempotency_key` nullable and not unique
+
+**What:** Duplicate idempotency keys were possible, breaking idempotent payment behaviour.
+
+**Fix:** Added `UNIQUE` constraint on `idempotency_key` in the migration.
+
+**Trade-offs:** Existing rows with `NULL` values are unaffected (multiple NULLs are allowed under SQL UNIQUE semantics).
+
+---
+
+### [FIXED] #26 · `payments.provider_txn_id` no length limit
+
+**What:** No length constraint enabled denial-of-service via gigantic strings.
+
+**Fix:** Added `CHECK (char_length(provider_txn_id) <= 255)`.
+
+**Trade-offs:** None for normal provider transaction IDs.
+
+---
+
+### [FIXED] #27 · No `UNIQUE` constraint on `payment_events.provider_event_id`
+
+**What:** No DB-level dedup for webhook events; relied entirely on Redis.
+
+**Fix:** Added `UNIQUE` constraint. Provides a secondary guard if Redis is unavailable.
+
+**Trade-offs:** Existing duplicate rows would need cleanup before applying the migration.
+
+---
+
+### [FIXED] #28 · `order_items` allows duplicate line items
+
+**What:** No composite unique constraint on `(order_id, product_id)` allowed the same product to appear twice in one order, double-counting quantities and totals.
+
+**Fix:** Added `UNIQUE (order_id, product_id)` constraint.
+
+**Trade-offs:** None; the service layer merges items before insert anyway.
+
+---
+
+### [FIXED] #29 · No index on `orders.customer_id`
+
+**What:** Queries filtering by customer caused full-table scans.
+
+**Fix:** Added `CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id)`.
+
+**Trade-offs:** Minor write overhead on order creation.
+
+---
+
+### [FIXED] #30 · `order_items.product_id` missing `ON DELETE RESTRICT`
+
+**What:** Deleting a product would orphan its order line items.
+
+**Fix:** Changed to `ON DELETE RESTRICT` to prevent product deletion if order items reference it.
+
+**Trade-offs:** Admins cannot delete products that have been ordered. A soft-delete (`is_active` flag) would be a better long-term pattern.
+
+---
+
+### [FIXED] #31 · `products.price` check allows sub-cent values
+
+**What:** `CHECK (price > 0)` allowed values like `0.001`, breaking cent-based arithmetic assumptions.
+
+**Fix:** Changed to `CHECK (price >= 0.01)`.
+
+**Trade-offs:** None for this application's currency assumptions.
+
+---
+
+### [NOTED, NOT FIXED] #32 · No currency column on monetary fields
+
+**What:** `NUMERIC(12,2)` stores amounts with no currency tag. Multi-currency use would require a separate `currency` column.
+
+**Why not fixed:** No multi-currency requirement exists in scope. Noted as an assumption.
