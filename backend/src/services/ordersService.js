@@ -33,11 +33,21 @@ function fromCents(cents) {
   return Number((cents / 100).toFixed(2));
 }
 
+function isValidString(str) {
+  return typeof str === "string" && str.trim().length > 0;
+}
+
 // ─── createOrder ─────────────────────────────────────────────────────────────
 
 async function createOrder({ customerId, items, totalAmount }) {
-  if (!customerId || !Array.isArray(items) || items.length === 0) {
-    const error = new Error("customerId and items are required");
+  if (!isValidString(customerId)) {
+    const error = new Error("customerId must be a valid string");
+    error.status = 400;
+    throw error;
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    const error = new Error("Order items are required");
     error.status = 400;
     throw error;
   }
@@ -129,52 +139,90 @@ async function createOrder({ customerId, items, totalAmount }) {
   });
 }
 
-async function chargeOrder({ orderId, idempotencyKey }) {
-  if (idempotencyKey) {
-    const cached = await redis.get(`idem:${idempotencyKey}`);
-    if (cached) {
-      return JSON.parse(cached);
+async function chargeOrder({ idempotencyKey, orderId, requestingCustomerId }) {
+  if (!isValidString(idempotencyKey) || !isValidString(requestingCustomerId)) {
+    const error = new Error(
+      "idempotencyKey and requestingCustomerId must be valid strings",
+    );
+    error.status = 400;
+    throw error;
+  }
+
+  const cached = await redis.get(`idem:${idempotencyKey}`);
+  if (cached) {
+    return JSON.parse(cached);
+  }
+
+  return withTransaction(async (client) => {
+    const order = await ordersRepository.getOrderById(orderId, client);
+
+    if (!order) {
+      const error = new Error("Order not found");
+      error.status = 404;
+      throw error;
     }
-  }
 
-  const order = await ordersRepository.getOrderById(orderId);
-  if (!order) {
-    const error = new Error("Order not found");
-    error.status = 404;
-    throw error;
-  }
+    // Authorization: ensure the caller owns this order.
+    if (order.customerId !== requestingCustomerId) {
+      const error = new Error(
+        "You do not have permission to charge this order",
+      );
+      error.status = 403;
+      throw error;
+    }
 
-  if (order.status !== "PENDING") {
-    const error = new Error("Only pending orders can be charged");
-    error.status = 409;
-    throw error;
-  }
+    if (order.status !== "PENDING") {
+      const error = new Error("Only pending orders can be charged");
+      error.status = 409;
+      throw error;
+    }
 
-  const gatewayResponse = await paymentGateway.charge({
-    orderId: order.id,
-    amount: order.totalAmount,
-  });
+    let gatewayResponse;
 
-  const payment = await paymentsRepository.createPayment({
-    orderId: order.id,
-    amount: gatewayResponse.chargedAmount,
-    providerTxnId: gatewayResponse.providerTxnId,
-    status: "SUCCESS",
-    idempotencyKey,
-  });
+    try {
+      gatewayResponse = await paymentGateway.charge({
+        orderId: order.id,
+        amount: order.totalAmount,
+      });
+    } catch (err) {
+      err.status = err.status || 502;
+      throw err;
+    }
 
-  const updatedOrder = await ordersRepository.markOrderAsPaid(order.id);
+    if (toCents(gatewayResponse.chargedAmount) !== toCents(order.totalAmount)) {
+      const error = new Error(
+        "Gateway charged amount does not match order total",
+      );
+      error.status = 502;
+      throw error;
+    }
 
-  if (idempotencyKey) {
+    // Use order amount instead of gateway response amount
+    const payment = await paymentsRepository.createPayment(
+      {
+        orderId: order.id,
+        amount: order.totalAmount,
+        providerTxnId: gatewayResponse.providerTxnId,
+        status: "SUCCESS",
+        idempotencyKey,
+      },
+      client,
+    );
+
+    const updatedOrder = await ordersRepository.markOrderAsPaid(
+      order.id,
+      client,
+    );
+
     await redis.set(
       `idem:${idempotencyKey}`,
       JSON.stringify({ order: updatedOrder, payment }),
       "EX",
       3600,
     );
-  }
 
-  return { order: updatedOrder, payment };
+    return { order: updatedOrder, payment };
+  });
 }
 
 async function processPaymentWebhook({
