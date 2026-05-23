@@ -227,6 +227,8 @@ async function chargeOrder({ idempotencyKey, orderId, requestingCustomerId }) {
   });
 }
 
+// ─── processPaymentWebhook ───────────────────────────────────────────────────
+
 async function processPaymentWebhook({
   providerEventId,
   orderId,
@@ -276,7 +278,15 @@ async function processPaymentWebhook({
   return { accepted: true };
 }
 
+// ─── Queries ─────────────────────────────────────────────────────────────────
+
 async function getOrderById(orderId) {
+  if (!isValidString(orderId)) {
+    const error = new Error("Order ID is required");
+    error.status = 400;
+    throw error;
+  }
+
   const order = await ordersRepository.getOrderWithDetails(orderId);
   if (!order) {
     const error = new Error("Order not found");
@@ -286,8 +296,16 @@ async function getOrderById(orderId) {
   return order;
 }
 
-async function listOrders(params) {
-  return ordersRepository.listOrders(params);
+async function listOrders({ limit = 50, offset = 0, ...rest } = {}) {
+  // Enforce a max page size to prevent full-table scans leaking to callers.
+  const safeLimit = Math.min(Number(limit) || 50, 200);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
+
+  return ordersRepository.listOrders({
+    limit: safeLimit,
+    offset: safeOffset,
+    ...rest,
+  });
 }
 
 module.exports = {
