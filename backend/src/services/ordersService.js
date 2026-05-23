@@ -33,6 +33,10 @@ function fromCents(cents) {
   return Number((cents / 100).toFixed(2));
 }
 
+function isValidSchemaId(id) {
+  return Number.isInteger(Number(id)) && Number(id) > 0;
+}
+
 function isValidString(str) {
   return typeof str === "string" && str.trim().length > 0;
 }
@@ -41,7 +45,7 @@ function isValidString(str) {
 
 async function createOrder({ customerId, items, totalAmount }) {
   if (!isValidString(customerId)) {
-    const error = new Error("customerId must be a valid string");
+    const error = new Error("customerId is not a valid ID");
     error.status = 400;
     throw error;
   }
@@ -66,7 +70,7 @@ async function createOrder({ customerId, items, totalAmount }) {
   const itemMap = new Map();
   for (const item of items) {
     if (
-      !item.productId ||
+      !isValidSchemaId(item.productId) ||
       !Number.isInteger(item.quantity) ||
       item.quantity < 1
     ) {
@@ -158,9 +162,15 @@ async function createOrder({ customerId, items, totalAmount }) {
 // ─── chargeOrder ─────────────────────────────────────────────────────────────
 
 async function chargeOrder({ idempotencyKey, orderId, requestingCustomerId }) {
-  if (!isValidString(idempotencyKey) || !isValidString(requestingCustomerId)) {
+  if (!isValidString(idempotencyKey)) {
+    const error = new Error("idempotencyKey must be a valid string");
+    error.status = 400;
+    throw error;
+  }
+
+  if (!isValidSchemaId(orderId) || !isValidString(requestingCustomerId)) {
     const error = new Error(
-      "idempotencyKey and requestingCustomerId must be valid strings",
+      "orderId and requestingCustomerId must be valid IDs",
     );
     error.status = 400;
     throw error;
@@ -251,7 +261,7 @@ async function processPaymentWebhook({
   eventType,
   payload,
 }) {
-  if (!isValidString(providerEventId) || !isValidString(orderId)) {
+  if (!isValidString(providerEventId) || !isValidSchemaId(orderId)) {
     const error = new Error("Valid providerEventId and orderId are required");
     error.status = 400;
     throw error;
@@ -297,7 +307,7 @@ async function processPaymentWebhook({
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
 async function getOrderById(orderId) {
-  if (!isValidString(orderId)) {
+  if (!isValidSchemaId(orderId)) {
     const error = new Error("Order ID is required");
     error.status = 400;
     throw error;
