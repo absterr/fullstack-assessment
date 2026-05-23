@@ -1,15 +1,25 @@
 const pool = require("../db/postgres");
 
-async function listProducts({ q } = {}, client = pool) {
+async function listProducts({ q, limit = 50, offset = 0 } = {}, client = pool) {
+  // Add a safe page size to prevent full-table scans leaking to callers.
+  const safeLimit = Math.min(Number(limit) || 50, 200);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
+
   if (q) {
     const query = `
       SELECT id, sku, name, description, price, stock,
              created_at AS "createdAt", updated_at AS "updatedAt"
       FROM products
-      WHERE name ILIKE '%${q}%' OR sku ILIKE '%${q}%'
+      WHERE name ILIKE $1 OR sku ILIKE $1
+      LIMIT $2 OFFSET $3
       ORDER BY id ASC
     `;
-    const { rows } = await client.query(query);
+    const { rows } = await client.query(query, [
+      `%${q}%`,
+      safeLimit,
+      safeOffset,
+    ]);
+
     return rows;
   }
 
@@ -18,8 +28,10 @@ async function listProducts({ q } = {}, client = pool) {
            created_at AS "createdAt", updated_at AS "updatedAt"
     FROM products
     ORDER BY id ASC
+    LIMIT $1 OFFSET $2
   `;
-  const { rows } = await client.query(query);
+  const { rows } = await client.query(query, [safeLimit, safeOffset]);
+
   return rows;
 }
 
