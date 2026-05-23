@@ -62,23 +62,39 @@ async function createOrder({ customerId, items, totalAmount }) {
     throw error;
   }
 
+  // Validate and deduplicate items before entering transaction
+  const itemMap = new Map();
+  for (const item of items) {
+    if (
+      !item.productId ||
+      !Number.isInteger(item.quantity) ||
+      item.quantity < 1
+    ) {
+      const error = new Error(
+        "Each item requires a valid productId and quantity",
+      );
+      error.status = 400;
+      throw error;
+    }
+    itemMap.set(
+      item.productId,
+      (itemMap.get(item.productId) ?? 0) + item.quantity,
+    );
+  }
+
+  /**
+   Sort ascending by productId to prevent deadlocks when concurrent
+   transactions lock the same rows in different orders.
+   */
+  const uniqueItems = Array.from(itemMap.entries())
+    .map(([productId, quantity]) => ({ productId, quantity }))
+    .sort((a, b) => a.productId - b.productId);
+
   return withTransaction(async (client) => {
     const enrichedItems = [];
     let computedTotalCents = 0;
 
-    for (const item of items) {
-      if (
-        !item.productId ||
-        !Number.isInteger(item.quantity) ||
-        item.quantity < 1
-      ) {
-        const error = new Error(
-          "Each item requires a valid productId and quantity",
-        );
-        error.status = 400;
-        throw error;
-      }
-
+    for (const item of uniqueItems) {
       // Lock the row so concurrent transactions cannot read stale stock.
       const product = await productsRepository.getProductByIdForUpdate(
         item.productId,
