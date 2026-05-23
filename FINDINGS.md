@@ -1,357 +1,341 @@
-# FINDINGS.md
+# Findings
 
-## Overview
-
-This document records all issues found in the `fullstack-assessment` codebase, organized by file. Each entry covers what the issue is, why it happens, the fix applied, and any remaining trade-offs.
+## Backend
 
 ---
 
-## `backend/src/services/ordersService.js`
+### Issue: Stock race condition (concurrency)
+
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`, stock check and `decrementStock` calls
+- **Why:** `decrementStock` was called outside any DB transaction. The `withTransaction` helper existed but was never used.
+- **Impact:** Concurrent orders could read the same stock value, both pass the stock check, and each decrement independently — resulting in overselling.
+- **Fix:** Wrapped the entire `createOrder` flow in `withTransaction`. Stock is now read with `SELECT FOR UPDATE` via `getProductByIdForUpdate`, locking the row for the duration of the transaction. No concurrent transaction can read or modify that row until committed.
+- **Trade-offs:** Row-level locking increases contention under very high concurrency. A queue-based reservation system would scale better but is out of scope.
 
 ---
 
-### [FIXED] #1 · Stock race condition (concurrency)
+### Issue: Non-atomic order creation
 
-**What:** `decrementStock` was called outside any DB transaction. Concurrent orders could read the same stock value, both pass the `product.stock < item.quantity` check, and each decrement stock — resulting in overselling.
-
-**Why it happens:** No row-level lock was held between the stock check and the decrement. The `withTransaction` helper existed but was never used.
-
-**Fix:** Wrapped the entire `createOrder` flow in `withTransaction`. Stock is now read with `SELECT FOR UPDATE` via `getProductByIdForUpdate`, locking the row for the duration of the transaction. No concurrent transaction can read or modify that row until the lock is released.
-
-**Trade-offs:** Row-level locking increases contention under very high concurrency. A queue-based reservation system would scale better but is out of scope here.
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`, stock decrement before order insert
+- **Why:** Stock decrement and order creation ran as separate queries with no wrapping transaction.
+- **Impact:** If `ordersRepository.createOrder` failed after stock was decremented, stock would be permanently reduced with no corresponding order.
+- **Fix:** Both operations now run inside the same `withTransaction` block. If the order insert fails, the transaction rolls back and stock is restored.
+- **Trade-offs:** None significant.
 
 ---
 
-### [FIXED] #2 · Non-atomic order creation
+### Issue: Item deduplication and deadlock prevention missing in `createOrder`
 
-**What:** `createOrder` decremented stock first, then created the order. If `ordersRepository.createOrder` failed, stock was permanently reduced with no corresponding order.
-
-**Why it happens:** The two operations ran as separate queries with no wrapping transaction.
-
-**Fix:** Both the stock decrement and order creation now run inside the same `withTransaction` block. If the order insert fails, the transaction rolls back and stock is restored.
-
-**Trade-offs:** None significant. This is the correct pattern.
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`, item processing loop
+- **Why:** No deduplication of items before locking. Duplicate productIds in the same payload could lock the same row twice. No consistent lock ordering meant concurrent transactions locking the same rows in different orders risked deadlocks.
+- **Impact:** Duplicate items could double-count stock and totals. Inconsistent lock ordering under concurrent load could cause deadlocks.
+- **Fix:** Items are deduplicated into a `Map` before the transaction. The resulting unique items are sorted ascending by `productId` before locking, ensuring a consistent lock order across all transactions.
+- **Trade-offs:** Merging quantities for duplicate productIds may surprise callers who expect per-line validation.
 
 ---
 
-### [FIXED] #3 · Idempotency key written after payment, no NX flag
+### Issue: Idempotency key written after payment, missing NX flag
 
-**What:** The idempotency cache was written _after_ the payment was processed. If the process crashed before `redis.set`, a retry would re-invoke the payment gateway and create a duplicate charge. Additionally, `redis.set` lacked the `NX` flag, so a later retry could overwrite a previously stored successful response.
-
-**Why it happens:** The cache write was treated as a logging step rather than a guard.
-
-**Fix:** Cache is checked before any work begins. It is written only after all DB commits succeed, using `NX` so it cannot overwrite an existing successful result.
-
-**Trade-offs:** A crash between the DB commit and the Redis write still leaves a narrow retry window. Acceptable for this scope; a distributed transaction log would eliminate it entirely.
+- **Where:** `backend/src/services/ordersService.js` — `chargeOrder`, Redis write
+- **Why:** Cache was written after payment processing as a logging step, not a guard. `NX` flag was omitted.
+- **Impact:** A crash before the cache write would allow a retry to re-invoke the gateway and create a duplicate charge. Without `NX`, a later retry could overwrite a previously stored successful response.
+- **Fix:** Cache is checked before any work begins. It is written only after all DB commits succeed, using `NX` so it cannot overwrite an existing successful result.
+- **Trade-offs:** A crash between the DB commit and the Redis write leaves a narrow retry window. A distributed transaction log would eliminate this entirely.
 
 ---
 
-### [FIXED] #4 · Missing authorization checks
+### Issue: Double-charge race condition in `chargeOrder`
 
-**What:** `createOrder`, `chargeOrder`, and `processPaymentWebhook` accepted `customerId`/`orderId` without verifying the caller is allowed to act on that resource.
-
-**Why it happens:** No auth middleware exists in the project; ownership checks were omitted entirely.
-
-**Fix:** `chargeOrder` now accepts a `requestingCustomerId` parameter and returns 403 if the order's `customerId` does not match. Route-level auth middleware is a remaining gap (see below).
-
-**Trade-offs:** Full auth requires JWT or session middleware wired to all routes — not implemented as it is absent from the entire project. Noted in FINDINGS as a remaining risk.
+- **Where:** `backend/src/services/ordersService.js` — `chargeOrder`, status check before gateway call
+- **Why:** The status check and gateway charge were not atomic. Two concurrent requests could both pass the `PENDING` check before either marked the order paid.
+- **Impact:** The same order could be charged twice.
+- **Fix:** `getOrderByIdForUpdate` locks the order row inside the transaction. Status is re-checked under the lock before the gateway call.
+- **Trade-offs:** Same contention trade-off as the stock race fix.
 
 ---
 
-### [FIXED] #5 · Float arithmetic for monetary values
+### Issue: Gateway `chargedAmount` trusted blindly
 
-**What:** `totalAmount` and `unitPrice` were coerced via `Number(...)` and stored directly. Floating-point arithmetic on monetary values causes rounding errors (e.g. `0.1 + 0.2 !== 0.3`).
-
-**Why it happens:** JavaScript's `Number` type uses IEEE 754 floating-point, which cannot represent all decimal fractions exactly.
-
-**Fix:** All internal money calculations use integer cents via `toCents()` / `fromCents()`. Values are converted back to `NUMERIC(12,2)` only at the storage boundary.
-
-**Trade-offs:** `fromCents` returns `Number((cents / 100).toFixed(2))` — this is safe for values within the range of this application but would need BigInt or a decimal library for very large amounts.
+- **Where:** `backend/src/services/ordersService.js` — `chargeOrder`, `createPayment` call
+- **Why:** The amount stored in `createPayment` came from the gateway response rather than `order.totalAmount`.
+- **Impact:** A compromised or misbehaving gateway could return a different amount which would be persisted as the canonical payment record.
+- **Fix:** Server verifies `toCents(gatewayResponse.chargedAmount) === toCents(order.totalAmount)`. Mismatch returns 502 and the transaction rolls back.
+- **Trade-offs:** Legitimate partial-charge scenarios (e.g. gateway-applied discounts) would be rejected. No such feature exists in this app.
 
 ---
 
-### [FIXED] #6 · Client-supplied `totalAmount` trusted
+### Issue: Float arithmetic for monetary values
 
-**What:** The API accepted the caller's `totalAmount` field without verifying it matched the server-computed sum of `unitPrice × quantity`. A tampered request could under-charge.
-
-**Why it happens:** The service used the client value directly.
-
-**Fix:** Server recomputes `totalAmount` in cents from product prices fetched from the DB. If the client-supplied value does not match, a 422 is returned.
-
-**Trade-offs:** Clients that pre-calculate totals will now receive errors on floating-point rounding differences. The cent-based comparison is strict by design.
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`, `chargeOrder`
+- **Why:** `totalAmount` and `unitPrice` were coerced via `Number(...)`. JavaScript's `Number` uses IEEE 754 floating-point which cannot represent all decimal fractions exactly.
+- **Impact:** Rounding errors in price calculations (e.g. `0.1 + 0.2 !== 0.3`), potentially causing totalAmount mismatches or incorrect charges.
+- **Fix:** All internal money calculations use integer cents via `toCents()` / `fromCents()`. `fromCents` uses `Number((cents / 100).toFixed(2))` to enforce 2-decimal precision. Values are converted back to `NUMERIC(12,2)` only at the storage boundary.
+- **Trade-offs:** Safe for this application's value ranges. Very large amounts would need BigInt or a decimal library.
 
 ---
 
-### [FIXED] #7 · Inconsistent idempotency cache content
+### Issue: Client-supplied `totalAmount` trusted
 
-**What:** The cached response included the order object but not a stable snapshot. A stale cache could return an order that had since transitioned state (e.g. `PENDING` → `FAILED`).
-
-**Why it happens:** Cache was written with incomplete state.
-
-**Fix:** Cache is now written after `markOrderAsPaid` completes, capturing the final `{ order, payment }` state. The `NX` flag ensures this snapshot is immutable once written.
-
-**Trade-offs:** If an order is later cancelled or refunded outside this flow, the cached response would be stale for up to 1 hour. Acceptable given the TTL.
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`
+- **Why:** The service used the client-provided `totalAmount` directly without server-side verification.
+- **Impact:** A tampered request could under-charge by supplying a lower total than the actual sum of items.
+- **Fix:** Server recomputes `totalAmount` in cents from DB product prices. Client-supplied value is rejected with 422 if it does not match.
+- **Trade-offs:** Strict cent-based equality. Clients pre-calculating totals with float arithmetic may hit mismatch errors.
 
 ---
 
-### [FIXED] #8 · Webhook handler not idempotent
+### Issue: Webhook handler not idempotent
 
-**What:** `processPaymentWebhook` called `markOrderAsPaid` on every `payment_succeeded` event with no deduplication, allowing the same order to be marked paid multiple times on provider retries.
-
-**Why it happens:** No dedup check before the state mutation.
-
-**Fix:** A Redis `SET NX` lock on `webhook:{providerEventId}` is acquired before any mutation. Duplicate deliveries return `{ accepted: true, deduplicated: true }` immediately. The lock is released on failure so the provider can retry successfully.
-
-**Trade-offs:** Redis is the dedup store; if Redis is unavailable, webhooks are rejected. A DB-level unique constraint on `provider_event_id` (added in schema migration) provides a secondary guard.
+- **Where:** `backend/src/services/ordersService.js` — `processPaymentWebhook`
+- **Why:** No deduplication check before calling `markOrderAsPaid`. Webhook event was also logged before dedup.
+- **Impact:** Provider retries could mark the same order paid multiple times and create duplicate webhook records.
+- **Fix:** A Redis `SET NX` lock on `webhook:{providerEventId}` is acquired before any mutation. Duplicate deliveries return `{ accepted: true, deduplicated: true }` immediately. The lock is released on failure so the provider can retry successfully. A DB-level `UNIQUE` constraint on `provider_event_id` provides a secondary guard.
+- **Trade-offs:** Redis is the primary dedup store. If Redis is unavailable, webhooks are rejected until it recovers.
 
 ---
 
-### [FIXED] #9 · `withTransaction` helper unused
+### Issue: Missing authorization checks
 
-**What:** The helper was defined but never called, leaving all critical sections unprotected.
-
-**Why it happens:** Likely an oversight during initial development.
-
-**Fix:** `withTransaction` is now used in `createOrder`, `chargeOrder`, and `processPaymentWebhook`.
-
-**Trade-offs:** None.
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`, `chargeOrder`, `processPaymentWebhook`
+- **Why:** No auth middleware exists in the project. Ownership checks were omitted entirely.
+- **Impact:** Any caller knowing an `orderId` could charge or query orders they do not own.
+- **Fix:** `chargeOrder` now accepts `requestingCustomerId` and returns 403 if the order's `customerId` does not match.
+- **Trade-offs:** Incomplete without route-level auth middleware supplying `requestingCustomerId`. Full JWT or session auth is absent from the entire project and is noted as a remaining risk.
 
 ---
 
-### [FIXED] #10 · No error handling around `paymentGateway.charge`
+### Issue: `withTransaction` helper unused
 
-**What:** If the gateway threw, the function aborted without rolling back side effects (e.g. a partially cached idempotency key).
-
-**Why it happens:** No try/catch around the gateway call.
-
-**Fix:** Gateway call is wrapped in try/catch inside the transaction. On failure the transaction rolls back and the idempotency key is not cached, leaving the caller free to retry safely.
-
-**Trade-offs:** None significant.
+- **Where:** `backend/src/services/ordersService.js` — defined at top of file, never called
+- **Why:** Likely an oversight during initial development.
+- **Impact:** All critical sections (stock decrement, order creation, charge, webhook processing) ran without transaction protection.
+- **Fix:** `withTransaction` is now used in `createOrder`, `chargeOrder`, and `processPaymentWebhook`.
+- **Trade-offs:** None.
 
 ---
 
-### [FIXED] #11 · `redis.set` without `NX`
+### Issue: No error handling around `paymentGateway.charge`
 
-**What:** The idempotency cache write did not use `NX`, so a race could overwrite a previously stored successful response with a later failed one.
-
-**Why it happens:** `NX` was omitted from the `redis.set` call.
-
-**Fix:** All idempotency `redis.set` calls now include `NX`.
-
-**Trade-offs:** None.
+- **Where:** `backend/src/services/ordersService.js` — `chargeOrder`, gateway call
+- **Why:** No try/catch around the external gateway call.
+- **Impact:** A gateway failure would abort the function without rolling back side effects or setting an appropriate HTTP status.
+- **Fix:** Gateway call is wrapped in try/catch inside the transaction. On failure the transaction rolls back and the idempotency key is not cached, leaving the caller free to retry safely. Status defaults to 502 if not set.
+- **Trade-offs:** None significant.
 
 ---
 
-### [NOTED, NOT FIXED] #12 · No input sanitization for `idempotencyKey`
+### Issue: Inconsistent idempotency cache content
 
-**What:** The key is taken verbatim and used as a Redis key. A malicious client could supply special characters or a very long value, risking key injection or memory exhaustion.
-
-**Why not fixed:** Sanitization belongs at the route validation layer (e.g. enforce UUID format with a schema validator like Zod or Joi). Not addressed here to avoid scope creep into the route layer.
-
-**Recommendation:** Validate `idempotencyKey` as a UUID v4 at the route level before it reaches the service.
-
----
-
-### [FIXED] #13 · `chargeOrder` ownership not checked at service level
-
-**What:** Any caller could charge any order by knowing its ID, even if route-level auth existed.
-
-**Fix:** `chargeOrder` now accepts `requestingCustomerId` and returns 403 on mismatch.
-
-**Trade-offs:** Requires callers to pass `requestingCustomerId`; incomplete without auth middleware supplying it.
+- **Where:** `backend/src/services/ordersService.js` — `chargeOrder`, Redis write
+- **Why:** Cache was written before `markOrderAsPaid` in the original code, capturing incomplete state.
+- **Impact:** Cached response could reflect a stale order state.
+- **Fix:** Cache is written after all DB commits complete, capturing the final `{ order, payment }` state. `NX` ensures the snapshot is immutable once written.
+- **Trade-offs:** If an order is later refunded outside this flow, the cached response would be stale for up to 1 hour.
 
 ---
 
-### [FIXED] #14 · Double-charge race condition in `chargeOrder`
+### Issue: SQL injection in `listProducts`
 
-**What:** The status check and gateway charge were not atomic. Two concurrent requests could both pass the `PENDING` check before either marked the order paid.
-
-**Why it happens:** No row-level lock on the order between status check and charge.
-
-**Fix:** `getOrderByIdForUpdate` locks the order row inside the transaction. Status is re-checked under the lock.
-
-**Trade-offs:** Same contention trade-off as #1.
+- **Where:** `backend/src/repositories/productsRepository.js` — `listProducts`, search query
+- **Why:** User-provided `q` was interpolated directly into the SQL string (`WHERE name ILIKE '%${q}%'`).
+- **Impact:** An attacker could inject arbitrary SQL, compromising the database.
+- **Fix:** Replaced with a parameterized query using `$1`. The `%` wildcards are applied in the JS string passed as the parameter value, which is safe.
+- **Trade-offs:** None.
 
 ---
 
-### [FIXED] #15 · `processPaymentWebhook` logs event before dedup
+### Issue: `getProductByIdForUpdate` missing `FOR UPDATE`
 
-**What:** `createWebhookEvent` was called before any deduplication check, creating duplicate webhook records on retries.
-
-**Fix:** Redis `NX` dedup check runs first. The event is only written to the DB after the lock is acquired.
-
-**Trade-offs:** None significant.
-
----
-
-### [FIXED] #16 · Gateway `chargedAmount` trusted blindly
-
-**What:** The amount stored in `paymentsRepository.createPayment` came from the gateway response, not `order.totalAmount`. A compromised gateway could return a different amount.
-
-**Fix:** Server verifies `toCents(gatewayResponse.chargedAmount) === toCents(order.totalAmount)`. Mismatch returns 502.
-
-**Trade-offs:** Legitimate partial-charge scenarios (e.g. discounts applied by gateway) would be rejected. Acceptable given no such feature exists here.
+- **Where:** `backend/src/repositories/productsRepository.js` — `getProductByIdForUpdate`
+- **Why:** The function name implied a locking read but the query issued a plain `SELECT` with no `FOR UPDATE` clause.
+- **Impact:** The stock race condition fix in `ordersService.js` was ineffective — concurrent transactions could still read stale stock.
+- **Fix:** Added `FOR UPDATE` to the query. Also updated `createOrder` to call `getProductByIdForUpdate` instead of `getProductById`.
+- **Trade-offs:** Must be called inside a transaction; calling it outside will throw.
 
 ---
 
-### [NOTED, NOT FIXED] #17 · Hardcoded idempotency TTL
+### Issue: `decrementStock` missing stock floor guard
 
-**What:** 3600s is hardcoded with no configurability. May be too short for retries hours later.
-
-**Recommendation:** Move to an environment variable (e.g. `IDEMPOTENCY_TTL_SECONDS`).
-
----
-
-### [FIXED] #18 · Unbounded `listOrders`
-
-**What:** No pagination or limit, potentially returning the entire orders table.
-
-**Fix:** Default limit 50, hard cap 200, with `offset` support.
-
-**Trade-offs:** Callers relying on unbounded results will need to paginate.
-
-## `backend/src/repositories/productsRepository.js`
+- **Where:** `backend/src/repositories/productsRepository.js` — `decrementStock`
+- **Why:** The `UPDATE` had no condition preventing stock from going negative if called directly.
+- **Impact:** A direct repository call bypassing the service layer could decrement stock below zero.
+- **Fix:** Added `AND stock >= $2` to the `WHERE` clause. Returns `null` if the condition is not met.
+- **Trade-offs:** Defence-in-depth only; the service layer already checks stock before calling this.
 
 ---
 
-### [FIXED] #19 · SQL injection in `listProducts`
+### Issue: Inconsistent `client` parameter across repository functions
 
-**What:** The search query interpolated user-provided `q` directly into the SQL string (`WHERE name ILIKE '%${q}%'`), enabling arbitrary SQL injection.
-
-**Why it happens:** String interpolation used instead of parameterized queries.
-
-**Fix:** Replaced with a parameterized query using `$1` placeholder. The `%` wildcards are applied in the JS string passed as the parameter value, which is safe.
-
-**Trade-offs:** None.
+- **Where:** `backend/src/repositories/productsRepository.js` — `createProduct`, `updateProduct`
+- **Why:** Both functions hard-coded the pool, making them incompatible with transactional callers.
+- **Impact:** Calls to `createProduct` or `updateProduct` from within a transaction would use a separate connection, breaking atomicity.
+- **Fix:** Both now accept an optional `client` parameter defaulting to `pool`.
+- **Trade-offs:** None.
 
 ---
 
-### [FIXED] #20 · `getProductByIdForUpdate` missing `FOR UPDATE`
+### Issue: No pagination on `listProducts` and `listOrders`
 
-**What:** The function was named to imply a locking read but did not include `FOR UPDATE`, making it ineffective for preventing concurrent stock modifications.
-
-**Fix:** Added `FOR UPDATE` to the query.
-
-**Trade-offs:** Must be called inside a transaction; calling it outside will throw.
-
----
-
-### [FIXED] #21 · `decrementStock` missing stock floor guard
-
-**What:** The `UPDATE` could decrement stock below zero if called outside the service-layer stock check (e.g. via a direct repository call).
-
-**Fix:** Added `AND stock >= $2` to the `WHERE` clause. Returns `null` if the condition is not met, which the service layer treats as an error.
-
-**Trade-offs:** Defence-in-depth only; the service layer already checks stock before calling this.
+- **Where:** `backend/src/repositories/productsRepository.js` — `listProducts`; `backend/src/services/ordersService.js` — `listOrders`
+- **Why:** No limit or offset applied to either query.
+- **Impact:** Full-table scans on large datasets; potential memory exhaustion and DoS.
+- **Fix:** Added `limit` (default 50, max 200) and `offset` parameters to both.
+- **Trade-offs:** Callers relying on unbounded results will need to paginate.
 
 ---
 
-### [FIXED] #22 · Inconsistent `client` parameter across repository functions
+### Issue: `payments.idempotency_key` nullable and not unique
 
-**What:** `createProduct` and `updateProduct` hard-coded the pool, making them incompatible with transactional callers.
-
-**Fix:** Both now accept an optional `client` parameter defaulting to `pool`.
-
-**Trade-offs:** None.
-
----
-
-### [FIXED] #23 · No pagination on `listProducts`
-
-**What:** Returned the entire products table with no limit.
-
-**Fix:** Added `limit` (default 50, max 200) and `offset` parameters, consistent with `listOrders`.
-
-**Trade-offs:** Same as #18.
+- **Where:** `backend/src/db/schema.sql` — `payments` table
+- **Why:** Column was defined as nullable with no uniqueness constraint.
+- **Impact:** Duplicate idempotency keys were possible, breaking idempotent payment behaviour.
+- **Fix:** Added `UNIQUE` constraint on `idempotency_key` in the migration.
+- **Trade-offs:** Multiple `NULL` values are still permitted under SQL UNIQUE semantics.
 
 ---
 
-### [NOTED, NOT FIXED] #24 · XSS via product `name`/`description` fields
+### Issue: `payments.provider_txn_id` no length limit
 
-**What:** The repository returns raw text fields. If rendered unescaped in the frontend, a malicious product name could inject script tags.
-
-**Why not fixed here:** Sanitization belongs at the frontend render layer. React escapes text content by default; the risk is only present if `dangerouslySetInnerHTML` is used.
-
-**Recommendation:** Audit frontend rendering of product fields (see frontend findings).
-
----
-
-## `backend/src/db/schema.sql`
+- **Where:** `backend/src/db/schema.sql` — `payments` table
+- **Why:** Column was defined as `TEXT NOT NULL UNIQUE` with no length constraint.
+- **Impact:** A malicious client could insert gigantic strings, causing resource exhaustion.
+- **Fix:** Added `CHECK (char_length(provider_txn_id) <= 255)`.
+- **Trade-offs:** None for normal provider transaction IDs.
 
 ---
 
-### [FIXED] #25 · `payments.idempotency_key` nullable and not unique
+### Issue: No `UNIQUE` constraint on `payment_events.provider_event_id`
 
-**What:** Duplicate idempotency keys were possible, breaking idempotent payment behaviour.
-
-**Fix:** Added `UNIQUE` constraint on `idempotency_key` in the migration.
-
-**Trade-offs:** Existing rows with `NULL` values are unaffected (multiple NULLs are allowed under SQL UNIQUE semantics).
-
----
-
-### [FIXED] #26 · `payments.provider_txn_id` no length limit
-
-**What:** No length constraint enabled denial-of-service via gigantic strings.
-
-**Fix:** Added `CHECK (char_length(provider_txn_id) <= 255)`.
-
-**Trade-offs:** None for normal provider transaction IDs.
+- **Where:** `backend/src/db/schema.sql` — `payment_events` table
+- **Why:** Column had no uniqueness constraint, relying entirely on Redis for dedup.
+- **Impact:** If Redis was unavailable, duplicate webhook events could be persisted.
+- **Fix:** Added `UNIQUE` constraint as a secondary guard.
+- **Trade-offs:** Existing duplicate rows would need cleanup before applying the migration.
 
 ---
 
-### [FIXED] #27 · No `UNIQUE` constraint on `payment_events.provider_event_id`
+### Issue: `order_items` allows duplicate line items
 
-**What:** No DB-level dedup for webhook events; relied entirely on Redis.
-
-**Fix:** Added `UNIQUE` constraint. Provides a secondary guard if Redis is unavailable.
-
-**Trade-offs:** Existing duplicate rows would need cleanup before applying the migration.
-
----
-
-### [FIXED] #28 · `order_items` allows duplicate line items
-
-**What:** No composite unique constraint on `(order_id, product_id)` allowed the same product to appear twice in one order, double-counting quantities and totals.
-
-**Fix:** Added `UNIQUE (order_id, product_id)` constraint.
-
-**Trade-offs:** None; the service layer merges items before insert anyway.
+- **Where:** `backend/src/db/schema.sql` — `order_items` table
+- **Why:** No composite unique constraint on `(order_id, product_id)`.
+- **Impact:** The same product could appear twice in one order, double-counting quantities and totals.
+- **Fix:** Added `UNIQUE (order_id, product_id)` constraint.
+- **Trade-offs:** None; the service layer merges duplicate items before insert.
 
 ---
 
-### [FIXED] #29 · No index on `orders.customer_id`
+### Issue: No index on `orders.customer_id`
 
-**What:** Queries filtering by customer caused full-table scans.
-
-**Fix:** Added `CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id)`.
-
-**Trade-offs:** Minor write overhead on order creation.
-
----
-
-### [FIXED] #30 · `order_items.product_id` missing `ON DELETE RESTRICT`
-
-**What:** Deleting a product would orphan its order line items.
-
-**Fix:** Changed to `ON DELETE RESTRICT` to prevent product deletion if order items reference it.
-
-**Trade-offs:** Admins cannot delete products that have been ordered. A soft-delete (`is_active` flag) would be a better long-term pattern.
+- **Where:** `backend/src/db/schema.sql` — `orders` table
+- **Why:** No index defined on a frequently filtered column.
+- **Impact:** Queries filtering by customer cause full-table scans, impacting performance at scale.
+- **Fix:** Added `CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id)`.
+- **Trade-offs:** Minor write overhead on order creation.
 
 ---
 
-### [FIXED] #31 · `products.price` check allows sub-cent values
+### Issue: `order_items.product_id` missing `ON DELETE RESTRICT`
 
-**What:** `CHECK (price > 0)` allowed values like `0.001`, breaking cent-based arithmetic assumptions.
-
-**Fix:** Changed to `CHECK (price >= 0.01)`.
-
-**Trade-offs:** None for this application's currency assumptions.
+- **Where:** `backend/src/db/schema.sql` — `order_items` table
+- **Why:** Foreign key had no delete rule, defaulting to `NO ACTION`.
+- **Impact:** Deleting a product would orphan its order line items, breaking referential integrity.
+- **Fix:** Changed to `ON DELETE RESTRICT` to prevent product deletion if order items reference it.
+- **Trade-offs:** Admins cannot delete products that have been ordered. A soft-delete (`is_active` flag) would be a better long-term pattern.
 
 ---
 
-### [NOTED, NOT FIXED] #32 · No currency column on monetary fields
+### Issue: `products.price` check allows sub-cent values
 
-**What:** `NUMERIC(12,2)` stores amounts with no currency tag. Multi-currency use would require a separate `currency` column.
+- **Where:** `backend/src/db/schema.sql` — `products` table
+- **Why:** `CHECK (price > 0)` allowed values like `0.001`.
+- **Impact:** Sub-cent prices break the cent-based arithmetic assumptions in the service layer.
+- **Fix:** Changed to `CHECK (price >= 0.01)`.
+- **Trade-offs:** None for this application's currency assumptions.
 
-**Why not fixed:** No multi-currency requirement exists in scope. Noted as an assumption.
+---
+
+### Issue: No validation of required environment variables
+
+- **Where:** `backend/src/config/env.js`
+- **Why:** `DATABASE_URL`, `REDIS_URL` were taken as-is with no presence check.
+- **Impact:** Missing values would cause runtime failures that leak stack traces rather than failing fast at startup.
+- **Fix:** Added `requireEnv(key, required)` which throws a descriptive error at startup if a required variable is missing.
+- **Trade-offs:** Optional vars with insecure defaults (`ADMIN_TOKEN`, `WEBHOOK_SECRET`) still start the app without warning.
+
+---
+
+### Issue: `PAYMENT_FAILURE_RATE` NaN on malformed input
+
+- **Where:** `backend/src/config/env.js` — `PAYMENT_FAILURE_RATE` parsing
+- **Why:** `Number(process.env.PAYMENT_FAILURE_RATE)` silently produces `NaN` if the value is malformed.
+- **Impact:** NaN could propagate into payment calculations, producing incorrect results silently.
+- **Fix:** Added `requireNumericEnv(key, defaultValue)` which parses and validates numeric env vars at startup, throwing if the result is `NaN`. Applied to `PORT`, `PAYMENT_FAILURE_RATE`, `PAYMENT_DELAY_MIN_MS`, and `PAYMENT_DELAY_MAX_MS`.
+- **Trade-offs:** None significant.
+
+---
+
+### Issue: Open CORS policy
+
+- **Where:** `backend/src/app.js` — `cors()` configuration
+- **Why:** `origin: "*"` was used as a development convenience.
+- **Impact:** Any website could make credentialed requests to the API, widening the attack surface for CSRF and credential theft on admin routes.
+- **Fix:** Replaced with `origin: env.FRONTEND_ORIGIN`, defaulting to `http://localhost:5173`.
+- **Trade-offs:** Any frontend not matching `FRONTEND_ORIGIN` will be blocked. Intentional.
+
+---
+
+### Issue: No request body size limit
+
+- **Where:** `backend/src/app.js` — `express.json()` middleware
+- **Why:** `express.json()` was used with no options.
+- **Impact:** Unbounded request bodies could be used for memory exhaustion or DoS.
+- **Fix:** Added `limit: "100kb"` to `express.json()`.
+- **Trade-offs:** Legitimate large payloads would be rejected. No such endpoint exists in this app.
+
+---
+
+### Issue: No authentication guard on admin routes
+
+- **Where:** `backend/src/app.js` — `/admin` route mounting; `backend/src/routes/adminRoutes.js`
+- **Why:** `/admin` was mounted with no middleware. The routes themselves had no token check.
+- **Impact:** Anyone could create or update products without authentication.
+- **Fix:** Added an auth middleware before the admin router that validates `Authorization: Bearer <token>` against `env.ADMIN_TOKEN`. Returns 401 on missing or invalid token.
+- **Trade-offs:** Uses a shared secret rather than JWT. Acceptable given no auth system exists in the project; noted as a remaining risk.
+
+---
+
+### Issue: Error handler exposed internal details on 5xx
+
+- **Where:** `backend/src/app.js` — global error handler
+- **Why:** `error.message` was returned for all errors including 500s.
+- **Impact:** Internal implementation details (DB errors, stack context) could be exposed to clients.
+- **Fix:** 5xx responses now return the generic string `"Internal server error"`. 4xx responses still return `error.message` as those are intentional caller-facing errors.
+- **Trade-offs:** Debugging production 5xx errors requires log access rather than response inspection. Correct behaviour.
+
+---
+
+## Remaining Risks
+
+| Risk                                                               | Reason not addressed                                                                                                           |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Full JWT / session auth middleware                                 | Entirely absent from the project; would require route-level changes across all endpoints                                       |
+| `idempotencyKey` format validation                                 | Belongs at route validation layer (Zod/Joi); out of scope                                                                      |
+| Hardcoded insecure defaults for `ADMIN_TOKEN` and `WEBHOOK_SECRET` | Operational concern; requires deployment pipeline controls                                                                     |
+| Hardcoded Redis TTLs                                               | Low risk for assessment scope; move to env vars in production                                                                  |
+| Rate limiting                                                      | Requires `express-rate-limit` dependency; out of scope                                                                         |
+| Helmet security headers                                            | Requires `helmet` dependency; out of scope                                                                                     |
+| Unhandled promise rejections in route handlers                     | All current handlers use try/catch with `next(err)`; a global `asyncWrapper` is a defensive improvement, not an active bug fix |
+| Multi-currency support                                             | No requirement in spec                                                                                                         |
+| Product soft-delete                                                | Better pattern than `ON DELETE RESTRICT` but out of scope                                                                      |
+
+---
+
+## Frontend
+
+> To be completed.
+
+---
+
+## Cross-cutting
+
+> To be completed.
