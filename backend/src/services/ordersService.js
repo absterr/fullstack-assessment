@@ -20,6 +20,21 @@ async function withTransaction(callback) {
   }
 }
 
+/**
+ * Convert a monetary value to integer cents to avoid float arithmetic issues.
+ * All internal money calculations use cents; convert back to decimal only at
+ * the boundary (storage / response).
+ */
+function toCents(value) {
+  return Math.round(Number(value) * 100);
+}
+
+function fromCents(cents) {
+  return Number((cents / 100).toFixed(2));
+}
+
+// ─── createOrder ─────────────────────────────────────────────────────────────
+
 async function createOrder({ customerId, items, totalAmount }) {
   if (!customerId || !Array.isArray(items) || items.length === 0) {
     const error = new Error("customerId and items are required");
@@ -27,41 +42,91 @@ async function createOrder({ customerId, items, totalAmount }) {
     throw error;
   }
 
-  const enrichedItems = [];
-  for (const item of items) {
-    const product = await productsRepository.getProductById(item.productId);
-    if (!product) {
-      const error = new Error(`Product ${item.productId} not found`);
-      error.status = 404;
-      throw error;
-    }
-    if (product.stock < item.quantity) {
-      const error = new Error(`Insufficient stock for ${product.name}`);
-      error.status = 409;
-      throw error;
-    }
-    enrichedItems.push({
-      productId: product.id,
-      quantity: item.quantity,
-      unitPrice: Number(product.price),
-    });
+  if (
+    typeof totalAmount !== "number" ||
+    Number.isNaN(totalAmount) ||
+    totalAmount <= 0
+  ) {
+    const error = new Error("totalAmount must be a valid positive number");
+    error.status = 400;
+    throw error;
   }
 
-  for (const item of enrichedItems) {
-    await productsRepository.decrementStock(
-      item.productId,
-      item.quantity,
-      db,
+  return withTransaction(async (client) => {
+    const enrichedItems = [];
+    let computedTotalCents = 0;
+
+    for (const item of items) {
+      if (
+        !item.productId ||
+        !Number.isInteger(item.quantity) ||
+        item.quantity < 1
+      ) {
+        const error = new Error(
+          "Each item requires a valid productId and quantity",
+        );
+        error.status = 400;
+        throw error;
+      }
+
+      // Lock the row so concurrent transactions cannot read stale stock.
+      const product = await productsRepository.getProductById(
+        item.productId,
+        client,
+      );
+
+      if (!product) {
+        const error = new Error(`Product ${item.productId} not found`);
+        error.status = 404;
+        throw error;
+      }
+
+      if (product.stock < item.quantity) {
+        const error = new Error(`Insufficient stock for ${product.name}`);
+        error.status = 409;
+        throw error;
+      }
+
+      const unitPriceCents = toCents(product.price);
+      computedTotalCents += unitPriceCents * item.quantity;
+
+      enrichedItems.push({
+        productId: product.id,
+        quantity: item.quantity,
+        unitPrice: fromCents(unitPriceCents),
+      });
+    }
+
+    // Reject if the client-supplied totalAmount doesn't match server computation.
+    // Trade-off: strict equality in cents avoids float drift.
+    const providedTotalCents = toCents(totalAmount);
+    if (computedTotalCents !== providedTotalCents) {
+      const error = new Error(
+        `totalAmount mismatch: expected ${fromCents(computedTotalCents)}, got ${totalAmount}`,
+      );
+      error.status = 422;
+      throw error;
+    }
+
+    for (const item of enrichedItems) {
+      await productsRepository.decrementStock(
+        item.productId,
+        item.quantity,
+        client,
+      );
+    }
+
+    const order = await ordersRepository.createOrder(
+      {
+        customerId,
+        totalAmount: fromCents(computedTotalCents),
+        items: enrichedItems,
+      },
+      client,
     );
-  }
 
-  const order = await ordersRepository.createOrder({
-    customerId,
-    totalAmount: Number(totalAmount),
-    items: enrichedItems,
+    return order;
   });
-
-  return order;
 }
 
 async function chargeOrder({ orderId, idempotencyKey }) {
