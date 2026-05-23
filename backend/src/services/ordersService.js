@@ -139,6 +139,8 @@ async function createOrder({ customerId, items, totalAmount }) {
   });
 }
 
+// ─── chargeOrder ─────────────────────────────────────────────────────────────
+
 async function chargeOrder({ idempotencyKey, orderId, requestingCustomerId }) {
   if (!isValidString(idempotencyKey) || !isValidString(requestingCustomerId)) {
     const error = new Error(
@@ -231,15 +233,44 @@ async function processPaymentWebhook({
   eventType,
   payload,
 }) {
-  await paymentsRepository.createWebhookEvent({
-    providerEventId,
-    orderId,
-    eventType,
-    payload,
-  });
+  if (!isValidString(providerEventId) || !isValidString(orderId)) {
+    const error = new Error("Valid providerEventId and orderId are required");
+    error.status = 400;
+    throw error;
+  }
 
-  if (eventType === "payment_succeeded") {
-    await ordersRepository.markOrderAsPaid(orderId);
+  const dedupKey = `webhook:${providerEventId}`;
+  const isAcquired = await redis.set(dedupKey, "1", "EX", 86400, "NX");
+
+  // Return accepted if already processed to stop retries
+  if (!isAcquired) {
+    return { accepted: true, deduplicated: true };
+  }
+
+  try {
+    await paymentsRepository.createWebhookEvent({
+      providerEventId,
+      orderId,
+      eventType,
+      payload,
+    });
+
+    if (eventType === "payment_succeeded") {
+      await withTransaction(async (client) => {
+        const order = await ordersRepository.getOrderByIdForUpdate(
+          orderId,
+          client,
+        );
+
+        if (order && order.status === "PENDING") {
+          await ordersRepository.markOrderAsPaid(orderId, client);
+        }
+      });
+    }
+  } catch (err) {
+    // Release dedup key for retries
+    await redis.del(dedupKey);
+    throw err;
   }
 
   return { accepted: true };
