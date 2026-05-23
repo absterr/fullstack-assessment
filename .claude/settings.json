@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(docker compose *)",
+      "Read(**)",
+      "Edit(**)"
+    ],
+    "deny": ["Bash(git push *)", "Bash(rm -rf *)"]
+  }
+}
