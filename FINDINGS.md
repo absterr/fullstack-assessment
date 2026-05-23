@@ -209,3 +209,67 @@ This document records all issues found in the `fullstack-assessment` codebase, o
 **Fix:** Default limit 50, hard cap 200, with `offset` support.
 
 **Trade-offs:** Callers relying on unbounded results will need to paginate.
+
+## `backend/src/repositories/productsRepository.js`
+
+---
+
+### [FIXED] #19 · SQL injection in `listProducts`
+
+**What:** The search query interpolated user-provided `q` directly into the SQL string (`WHERE name ILIKE '%${q}%'`), enabling arbitrary SQL injection.
+
+**Why it happens:** String interpolation used instead of parameterized queries.
+
+**Fix:** Replaced with a parameterized query using `$1` placeholder. The `%` wildcards are applied in the JS string passed as the parameter value, which is safe.
+
+**Trade-offs:** None.
+
+---
+
+### [FIXED] #20 · `getProductByIdForUpdate` missing `FOR UPDATE`
+
+**What:** The function was named to imply a locking read but did not include `FOR UPDATE`, making it ineffective for preventing concurrent stock modifications.
+
+**Fix:** Added `FOR UPDATE` to the query.
+
+**Trade-offs:** Must be called inside a transaction; calling it outside will throw.
+
+---
+
+### [FIXED] #21 · `decrementStock` missing stock floor guard
+
+**What:** The `UPDATE` could decrement stock below zero if called outside the service-layer stock check (e.g. via a direct repository call).
+
+**Fix:** Added `AND stock >= $2` to the `WHERE` clause. Returns `null` if the condition is not met, which the service layer treats as an error.
+
+**Trade-offs:** Defence-in-depth only; the service layer already checks stock before calling this.
+
+---
+
+### [FIXED] #22 · Inconsistent `client` parameter across repository functions
+
+**What:** `createProduct` and `updateProduct` hard-coded the pool, making them incompatible with transactional callers.
+
+**Fix:** Both now accept an optional `client` parameter defaulting to `pool`.
+
+**Trade-offs:** None.
+
+---
+
+### [FIXED] #23 · No pagination on `listProducts`
+
+**What:** Returned the entire products table with no limit.
+
+**Fix:** Added `limit` (default 50, max 200) and `offset` parameters, consistent with `listOrders`.
+
+**Trade-offs:** Same as #18.
+
+---
+
+### [NOTED, NOT FIXED] #24 · XSS via product `name`/`description` fields
+
+**What:** The repository returns raw text fields. If rendered unescaped in the frontend, a malicious product name could inject script tags.
+
+**Why not fixed here:** Sanitization belongs at the frontend render layer. React escapes text content by default; the risk is only present if `dangerouslySetInnerHTML` is used.
+
+**Recommendation:** Audit frontend rendering of product fields (see frontend findings).
