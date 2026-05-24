@@ -340,7 +340,64 @@
 
 ## Frontend
 
-> To be completed.
+### Issue: No idempotency key sent on `chargeOrder`
+
+- **Where:** `frontend/src/api.ts` — `chargeOrder`
+- **Why:** No `Idempotency-Key` header was sent, so retries on network failure would create duplicate charge attempts.
+- **Impact:** Double-charging on transient network failures or user retries.
+- **Fix:** `crypto.randomUUID()` is generated client-side per charge attempt and sent as `Idempotency-Key`. The client owns the retry lifecycle — the same key is reused on retries of the same attempt.
+- **Trade-offs:** Key is generated per call, not per user action. A retry-aware wrapper would be needed to reuse the key across actual retries.
+
+---
+
+### Issue: No admin token on `listOrdersAdmin`
+
+- **Where:** `frontend/src/api.ts` — `listOrdersAdmin`
+- **Why:** `Authorization` header was absent, unlike `updateProductAdmin` which already sent the token.
+- **Impact:** Admin order listing would be rejected by the backend auth middleware after it was added.
+- **Fix:** Extracted token retrieval into `getAdminToken()` shared by both `listOrdersAdmin` and `updateProductAdmin`. Throws early if no token is found, preventing unnecessary requests.
+- **Trade-offs:** Token is read from `localStorage` or `VITE_ADMIN_TOKEN` env var. Storing tokens in `localStorage` is vulnerable to XSS — a `httpOnly` cookie would be more secure but requires backend changes.
+
+---
+
+### Issue: Server-side validation messages lost on error
+
+- **Where:** `frontend/src/api.ts` — `request`
+- **Why:** Errors were thrown as generic `new Error(data?.error || res.statusText)` without preserving the HTTP status code.
+- **Impact:** Callers could not distinguish 400 from 500, making it harder to display meaningful messages to users.
+- **Fix:** Error now includes a `status` property matching `res.status`. Server-side `error` string is preserved as the message when available.
+- **Trade-offs:** None significant.
+
+---
+
+### Issue: Float arithmetic for cart totals
+
+- **Where:** `frontend/src/state/CartContext.tsx` — `add`, `total`
+- **Why:** `parseFloat(product.price)` was used to store price, and `total` was computed with direct float multiplication.
+- **Impact:** Rounding errors in cart totals could cause `totalAmount` mismatches when submitting orders to the backend, resulting in 422 errors.
+- **Fix:** Prices are stored in integer cents via `toCents()` on add. Total is computed in cents and converted back via `fromCents()` only at the display/submission boundary. Shared `utils/money.ts` utility used for consistency with the backend.
+- **Trade-offs:** `CartItem.price` now stores cents. Any component rendering `item.price` directly must call `fromCents(item.price)` before display.
+
+---
+
+### Issue: No quantity validation on cart add
+
+- **Where:** `frontend/src/state/CartContext.tsx` — `add`
+- **Why:** No guard on the `quantity` parameter — zero or negative values could be added.
+- **Impact:** Invalid line items could be submitted to the backend, causing unexpected errors or incorrect totals.
+- **Fix:** `safeQuantity = Math.max(1, Math.floor(quantity))` applied before any state update.
+- **Trade-offs:** None.
+
+---
+
+## Remaining Risks (Frontend)
+
+| Risk                                      | Reason not addressed                                                                                                                                                                             |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Admin token stored in `localStorage`      | Vulnerable to XSS. A `httpOnly` cookie requires backend changes; out of scope.                                                                                                                   |
+| No retry logic with idempotency key reuse | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                                        |
+| Cart not persisted on page refresh        | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
+| Optimistic cart with no stock reservation | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout via `SELECT FOR UPDATE`. No frontend fix is possible without a backend reservation system. |
 
 ---
 
