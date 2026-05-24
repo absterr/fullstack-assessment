@@ -390,6 +390,76 @@
 
 ---
 
+### Issue: `dangerouslySetInnerHTML` on product description
+
+- **Where:** `frontend/src/pages/ProductDetailPage.tsx` — description render
+- **Why:** `dangerouslySetInnerHTML={{ __html: product.description }}` was used unnecessarily. `description` is a plain `TEXT` column with no HTML implied by the schema or type.
+- **Impact:** A malicious product description containing script tags would execute in the user's browser, enabling XSS attacks.
+- **Fix:** Replaced with `<p className="description">{product.description}</p>`. React escapes text content by default.
+- **Trade-offs:** If rich text rendering is ever needed, a sanitization library (e.g. DOMPurify) must be introduced before re-enabling HTML rendering.
+
+---
+
+### Issue: Float arithmetic for `totalAmount` in `buyNow`
+
+- **Where:** `frontend/src/pages/ProductDetailPage.tsx` — `handleBuyNow`
+- **Why:** `parseFloat(product.price) * quantity` used floating-point arithmetic, producing imprecise totals.
+- **Impact:** Rounding errors could cause `totalAmount` mismatches rejected by the backend with 422.
+- **Fix:** Total computed via `fromCents(toCents(Number(product.price)) * quantity)` using the shared `utils/money.ts` utility, consistent with the backend and cart.
+- **Trade-offs:** None.
+
+---
+
+### Issue: No error handling or loading state for `buyNow`
+
+- **Where:** `frontend/src/pages/ProductDetailPage.tsx` — `handleBuyNow`, button
+- **Why:** No try/catch around `createOrder`, no loading flag, no disabled state on the button.
+- **Impact:** Failed orders showed no feedback. Multiple clicks could submit duplicate orders.
+- **Fix:** Added `isBuying` flag — button is disabled while request is in flight. Errors are caught and displayed inline via `buyError` state. Fetch errors and buy errors use separate state to prevent one wiping out the other.
+- **Trade-offs:** None.
+
+---
+
+### Issue: Client-side stock check missing before `buyNow`
+
+- **Where:** `frontend/src/pages/ProductDetailPage.tsx` — `handleBuyNow`
+- **Why:** No guard prevented submitting a quantity exceeding available stock.
+- **Impact:** User would get a backend error with no clear feedback. `max` attribute on the input alone is not sufficient.
+- **Fix:** Added explicit check `if (quantity > product.stock)` before submitting. Backend enforces this too via `SELECT FOR UPDATE` — this is a UX guard only.
+- **Trade-offs:** Stock value is from the last fetch and may be stale. Backend is the source of truth.
+
+---
+
+### Issue: `setInterval` polling without cleanup
+
+- **Where:** `frontend/src/pages/OrderDetailPage.tsx` — `useEffect`
+- **Why:** `setInterval` was called with no cleanup and no reference stored, so the interval continued running after the component unmounted.
+- **Impact:** Memory leak and continued network requests after navigation away from the page. Multiple mounts would stack intervals.
+- **Fix:** Interval reference stored in `useRef`. Cleanup function returns `clearInterval` on unmount. Polling also stops automatically when order reaches a terminal status (`PAID`, `FAILED`, `CANCELLED`).
+- **Trade-offs:** None.
+
+---
+
+### Issue: No error handling for `getOrder` or `chargeOrder`
+
+- **Where:** `frontend/src/pages/OrderDetailPage.tsx` — `useEffect`, `pay`
+- **Why:** Neither call had try/catch. `getOrder` failures would leave the page in a loading state indefinitely.
+- **Impact:** Silent failures — user sees no feedback and cannot act.
+- **Fix:** Separate `fetchError` and `payError` states. Fetch failures replace the page with an error message. Pay failures display inline without losing the order page.
+- **Trade-offs:** None.
+
+---
+
+### Issue: Pay button not disabled during payment
+
+- **Where:** `frontend/src/pages/OrderDetailPage.tsx` — pay button
+- **Why:** Button text changed to "Charging..." but `disabled` attribute was absent.
+- **Impact:** Multiple clicks during payment could trigger duplicate charge attempts.
+- **Fix:** Button is disabled when `isPaying` is true. Backend idempotency key provides a secondary guard.
+- **Trade-offs:** None.
+
+---
+
 ## Remaining Risks (Frontend)
 
 | Risk                                      | Reason not addressed                                                                                                                                                                             |
@@ -398,6 +468,10 @@
 | No retry logic with idempotency key reuse | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                                        |
 | Cart not persisted on page refresh        | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
 | Optimistic cart with no stock reservation | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout via `SELECT FOR UPDATE`. No frontend fix is possible without a backend reservation system. |
+| Hard-coded `customerId: "customer_001"`   | No user table or auth system exists. Would require full authentication implementation.                                                                                                           |
+| CSRF protection on `buyNow` and `pay`     | Requires server-side session/cookie-based auth. Out of scope.                                                                                                                                    |
+| Optimistic cart with no stock reservation | Stock is not held when items are added. Backend correctly rejects oversold orders at checkout. No frontend fix possible without a backend reservation system.                                    |
+| Cart not persisted on page refresh        | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
 
 ---
 
