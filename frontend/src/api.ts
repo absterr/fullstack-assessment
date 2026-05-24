@@ -2,10 +2,17 @@ import type { Order, Product } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+function getAdminToken(): string {
+  const token =
+    localStorage.getItem("admin_token") ?? import.meta.env.VITE_ADMIN_TOKEN;
+
+  if (!token) {
+    throw new Error("No admin token found");
+  }
+  return token;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
@@ -15,7 +22,13 @@ async function request<T>(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data?.error || res.statusText);
+    // Preserve server-side validation messages for caller display
+    const message =
+      typeof data?.error === "string" ? data.error : res.statusText;
+    const error = new Error(message) as Error & { status: number };
+    error.status = res.status;
+
+    throw error;
   }
   return data as T;
 }
@@ -45,28 +58,37 @@ export function getOrder(id: number | string): Promise<Order> {
 }
 
 export function chargeOrder(orderId: number): Promise<{ order: Order }> {
-  return request<{ order: Order }>(`/payments/charge`, {
+  /**
+  Generate a unique idempotency key per charge attempt.
+  The client owns the retry lifecycle. Reuse this key on retries
+  */
+
+  const idempotencyKey = crypto.randomUUID();
+  return request<{ order: Order }>("/payments/charge", {
     method: "POST",
+    headers: {
+      "Idempotency-Key": idempotencyKey,
+    },
     body: JSON.stringify({ orderId }),
   });
 }
 
 export function listOrdersAdmin(): Promise<Order[]> {
-  return request<Order[]>(`/orders`);
+  return request<Order[]>("/orders", {
+    headers: {
+      Authorization: `Bearer ${getAdminToken()}`,
+    },
+  });
 }
 
 export function updateProductAdmin(
   id: number,
   body: { price?: number; stock?: number; description?: string; name?: string },
 ): Promise<Product> {
-  const token =
-    localStorage.getItem("admin_token") ??
-    import.meta.env.VITE_ADMIN_TOKEN ??
-    "";
   return request<Product>(`/admin/products/${id}`, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${getAdminToken()}`,
     },
     body: JSON.stringify(body),
   });
