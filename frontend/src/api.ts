@@ -32,9 +32,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
-export function listProducts(q?: string): Promise<Product[]> {
+export function listProducts(
+  q?: string,
+  signal?: AbortSignal,
+): Promise<Product[]> {
   const qs = q ? `?q=${encodeURIComponent(q)}` : "";
-  return request<Product[]>(`/products${qs}`);
+  return request<Product[]>(`/products${qs}`, { signal });
 }
 
 export function getProduct(id: number | string): Promise<Product> {

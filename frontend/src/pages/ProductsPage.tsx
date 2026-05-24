@@ -9,15 +9,21 @@ export default function ProductsPage() {
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   async function load(query: string) {
+    // Abort any in-flight request before starting a new one
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = new AbortController();
+
     setLoading(true);
     setFetchError(null);
 
     try {
-      const data = await listProducts(query);
+      const data = await listProducts(query, abortRef.current.signal);
       setProducts(data);
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setFetchError(
         err instanceof Error ? err.message : "Failed to load products",
       );
@@ -36,6 +42,9 @@ export default function ProductsPage() {
 
   useEffect(() => {
     load("");
+    return () => {
+      if (abortRef.current) abortRef.current.abort();
+    };
   }, []);
 
   return (
@@ -46,9 +55,7 @@ export default function ProductsPage() {
           type="text"
           value={q}
           placeholder="Search products"
-          onChange={(e) => {
-            handleSearch(e.target.value);
-          }}
+          onChange={(e) => handleSearch(e.target.value)}
         />
       </div>
       {loading ? (
