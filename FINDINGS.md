@@ -323,6 +323,16 @@
 
 ---
 
+### Issue: `createOrder` not idempotent
+
+- **Where:** `backend/src/services/ordersService.js` — `createOrder`; `backend/src/routes/ordersRoutes.js` — `POST /orders`
+- **Why:** No idempotency check on order creation. A network failure after the server processed the request but before the client received the response would cause a retry to create a duplicate order, decrementing stock and charging the customer twice.
+- **Impact:** Duplicate orders on retry, double stock decrement, potential double charge.
+- **Fix:** `POST /orders` now reads the optional `Idempotency-Key` header and passes it to `createOrder`. The service checks Redis for a cached response before processing. On success, the result is cached with `NX` and a 1-hour TTL under the `idem:order:` namespace — separate from the `idem:` namespace used by `chargeOrder` to avoid key collisions. If no key is provided the request proceeds normally without caching.
+- **Trade-offs:** Idempotency key is optional — callers that don't send one get no dedup protection. The frontend always sends a key per checkout attempt and reuses it on retries.
+
+---
+
 ## Remaining Risks
 
 | Risk                                           | Reason not addressed                                                                                                           |
