@@ -9,6 +9,9 @@ export default function OrderDetailPage() {
   const [isPaying, setPaying] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [payError, setPayError] = useState<string | null>(null);
+  const [idempotencyKey, setIdempotencyKey] = useState<string | undefined>(
+    undefined,
+  );
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -19,7 +22,9 @@ export default function OrderDetailPage() {
         .then((o) => {
           setOrder(o);
           // Stop polling once order reaches a terminal state
+          // If the order is not pending, clear the idempotency key
           if (o.status !== "PENDING") {
+            setIdempotencyKey(undefined);
             if (intervalRef.current) {
               clearInterval(intervalRef.current);
               intervalRef.current = null;
@@ -46,8 +51,14 @@ export default function OrderDetailPage() {
     setPaying(true);
     setPayError(null);
 
+    let currentIdempotencyKey = idempotencyKey;
+    if (!currentIdempotencyKey) {
+      currentIdempotencyKey = crypto.randomUUID();
+      setIdempotencyKey(currentIdempotencyKey);
+    }
+
     try {
-      const result = await chargeOrder(order!.id);
+      const result = await chargeOrder(order!.id, currentIdempotencyKey);
       setOrder(result.order);
     } catch (err) {
       setPayError(err instanceof Error ? err.message : "Payment failed");

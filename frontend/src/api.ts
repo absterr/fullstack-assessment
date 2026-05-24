@@ -56,17 +56,20 @@ export function getOrder(id: number | string): Promise<Order> {
   return request<Order>(`/orders/${id}`);
 }
 
-export function chargeOrder(orderId: number): Promise<{ order: Order }> {
+export function chargeOrder(
+  orderId: number,
+  idempotencyKey?: string,
+): Promise<{ order: Order }> {
   /**
-  Generate a unique idempotency key per charge attempt.
+  Generate a unique idempotency key per charge attempt if not provided
   The client owns the retry lifecycle. Reuse this key on retries
   */
 
-  const idempotencyKey = crypto.randomUUID();
+  const key = idempotencyKey ?? crypto.randomUUID();
   return request<{ order: Order }>("/payments/charge", {
     method: "POST",
     headers: {
-      "Idempotency-Key": idempotencyKey,
+      "Idempotency-Key": key,
     },
     body: JSON.stringify({ orderId }),
   });
