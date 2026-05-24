@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { chargeOrder, getOrder } from "../api";
 import type { Order } from "../types";
@@ -6,25 +6,56 @@ import type { Order } from "../types";
 export default function OrderDetailPage() {
   const { id } = useParams();
   const [order, setOrder] = useState<Order | null>(null);
-  const [paying, setPaying] = useState(false);
+  const [isPaying, setPaying] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [payError, setPayError] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!id) return;
-    getOrder(id).then(setOrder);
 
-    setInterval(() => {
-      getOrder(id).then(setOrder);
-    }, 2000);
+    function fetchOrder() {
+      getOrder(id!)
+        .then((o) => {
+          setOrder(o);
+          // Stop polling once order reaches a terminal state
+          if (o.status !== "PENDING") {
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+              intervalRef.current = null;
+            }
+          }
+        })
+        .catch((err) => setFetchError(err.message));
+    }
+
+    fetchOrder();
+    intervalRef.current = setInterval(fetchOrder, 2000);
+
+    // Cleanup on unmount
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+    };
   }, [id]);
 
-  if (!order) return <p>Loading order...</p>;
+  async function handlePay() {
+    if (!order || isPaying) return;
 
-  async function pay() {
     setPaying(true);
-    const result = await chargeOrder(order!.id);
-    setOrder(result.order);
-    setPaying(false);
+    try {
+      const result = await chargeOrder(order!.id);
+      setOrder(result.order);
+    } catch (err) {
+      setPayError(err instanceof Error ? err.message : "Payment failed");
+    } finally {
+      setPaying(false);
+    }
   }
+
+  if (fetchError) return <p>{fetchError}</p>;
+  if (!order) return <p>Loading order...</p>;
 
   return (
     <div className="page">
@@ -33,7 +64,6 @@ export default function OrderDetailPage() {
         Status: <span className={`status ${order.status}`}>{order.status}</span>
       </p>
       <p>Total: ${order.totalAmount}</p>
-
       <h2>Items</h2>
       <ul>
         {(order.items || []).map((item, idx) => (
@@ -53,9 +83,10 @@ export default function OrderDetailPage() {
         ))}
       </ul>
 
+      {payError && <p className="error">{payError}</p>}
       {order.status === "PENDING" && (
-        <button className="primary" onClick={pay}>
-          {paying ? "Charging..." : "Pay now"}
+        <button className="primary" onClick={handlePay} disabled={isPaying}>
+          {isPaying ? "Charging..." : "Pay now"}
         </button>
       )}
     </div>

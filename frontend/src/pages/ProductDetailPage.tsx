@@ -22,11 +22,6 @@ export default function ProductDetailPage() {
       .catch((err) => setFetchError(err.message));
   }, [id]);
 
-  if (!product) return <p>Loading...</p>;
-  if (fetchError) return <p className="error">{fetchError}</p>;
-
-  const isOutOfStock = product.stock === 0;
-
   async function handleBuyNow() {
     if (!product || isBuying) return;
 
@@ -55,6 +50,11 @@ export default function ProductDetailPage() {
       setBuying(false);
     }
   }
+
+  if (fetchError) return <p className="error">{fetchError}</p>;
+  if (!product) return <p>Loading...</p>;
+
+  const isOutOfStock = product.stock === 0;
 
   return (
     <div className="page">
