@@ -7,6 +7,7 @@ import {
   ReactNode,
 } from "react";
 import type { CartItem, Product } from "../types";
+import { toCents, fromCents } from "../utils/money";
 
 interface CartContextValue {
   items: CartItem[];
@@ -22,12 +23,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<CartItem[]>([]);
 
   const add = useCallback((product: Product, quantity = 1) => {
+    const safeQuantity = Math.max(1, Math.floor(quantity));
+
     setItems((current) => {
       const existing = current.find((i) => i.productId === product.id);
       if (existing) {
         return current.map((i) =>
           i.productId === product.id
-            ? { ...i, quantity: i.quantity + quantity }
+            ? { ...i, quantity: i.quantity + safeQuantity }
             : i,
         );
       }
@@ -36,8 +39,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
         {
           productId: product.id,
           name: product.name,
-          price: parseFloat(product.price),
-          quantity,
+          price: toCents(Number(product.price)),
+          safeQuantity,
         },
       ];
     });
@@ -50,7 +53,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const clear = useCallback(() => setItems([]), []);
 
   const total = useMemo(
-    () => items.reduce((sum, i) => sum + i.price * i.quantity, 0),
+    () => fromCents(items.reduce((sum, i) => sum + i.price * i.quantity, 0)),
     [items],
   );
 
@@ -67,3 +70,4 @@ export function useCart() {
   if (!ctx) throw new Error("useCart must be used inside CartProvider");
   return ctx;
 }
+v;
