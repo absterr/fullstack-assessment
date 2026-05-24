@@ -3,8 +3,7 @@ import type { Order, Product } from "./types";
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 
 function getAdminToken(): string {
-  const token =
-    localStorage.getItem("admin_token") ?? import.meta.env.VITE_ADMIN_TOKEN;
+  const token = localStorage.getItem("admin_token");
 
   if (!token) {
     throw new Error("No admin token found");

@@ -356,7 +356,7 @@
 - **Why:** `Authorization` header was absent, unlike `updateProductAdmin` which already sent the token.
 - **Impact:** Admin order listing would be rejected by the backend auth middleware after it was added.
 - **Fix:** Extracted token retrieval into `getAdminToken()` shared by both `listOrdersAdmin` and `updateProductAdmin`. Throws early if no token is found, preventing unnecessary requests.
-- **Trade-offs:** Token is read from `localStorage` or `VITE_ADMIN_TOKEN` env var. Storing tokens in `localStorage` is vulnerable to XSS — a `httpOnly` cookie would be more secure but requires backend changes.
+- **Trade-offs:** Token is read from `localStorage`. `VITE_ADMIN_TOKEN` env var fallback was removed. Storing tokens in `localStorage` is vulnerable to XSS — a `httpOnly` cookie would be more secure but requires backend changes.
 
 ---
 
@@ -394,7 +394,7 @@
 
 | Risk                                      | Reason not addressed                                                                                                                                                                             |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Admin token stored in `localStorage`      | Vulnerable to XSS. A `httpOnly` cookie requires backend changes; out of scope.                                                                                                                   |
+| Admin token stored in `localStorage`      | Vulnerable to XSS. `VITE_ADMIN_TOKEN` env var fallback removed as it exposes the secret in the client bundle. A `httpOnly` cookie requires backend changes; out of scope.                        |
 | No retry logic with idempotency key reuse | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                                        |
 | Cart not persisted on page refresh        | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
 | Optimistic cart with no stock reservation | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout via `SELECT FOR UPDATE`. No frontend fix is possible without a backend reservation system. |
