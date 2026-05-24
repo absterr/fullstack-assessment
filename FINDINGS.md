@@ -274,6 +274,15 @@
 
 ---
 
+### Issue: Insecure defaults for `ADMIN_TOKEN` and `WEBHOOK_SECRET`
+
+- **Where:** `backend/src/config/env.js` — `ADMIN_TOKEN` and `WEBHOOK_SECRET`
+- **Why:** Both defaulted to `"change-me"` and `"replace-me"`. Anyone reading the source could authenticate as admin or forge webhooks if the app ran with defaults.
+- **Impact:** Full admin access and webhook forgery without any credentials in any environment that forgot to set these vars.
+- **Fix:** Both are now enforced as required via `requireEnv`, throwing at startup if not set. No insecure fallback remains.
+- **Trade-offs:** Local development requires both vars to be explicitly set in `.env`. The provided `.env.example` should include placeholder guidance for new contributors.
+- ***
+
 ### Issue: Open CORS policy
 
 - **Where:** `backend/src/app.js` — `cors()` configuration
@@ -316,17 +325,16 @@
 
 ## Remaining Risks
 
-| Risk                                                               | Reason not addressed                                                                                                           |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| Full JWT / session auth middleware                                 | Entirely absent from the project; would require route-level changes across all endpoints                                       |
-| `idempotencyKey` format validation                                 | Belongs at route validation layer (Zod/Joi); out of scope                                                                      |
-| Hardcoded insecure defaults for `ADMIN_TOKEN` and `WEBHOOK_SECRET` | Operational concern; requires deployment pipeline controls                                                                     |
-| Hardcoded Redis TTLs                                               | Low risk for assessment scope; move to env vars in production                                                                  |
-| Rate limiting                                                      | Requires `express-rate-limit` dependency; out of scope                                                                         |
-| Helmet security headers                                            | Requires `helmet` dependency; out of scope                                                                                     |
-| Unhandled promise rejections in route handlers                     | All current handlers use try/catch with `next(err)`; a global `asyncWrapper` is a defensive improvement, not an active bug fix |
-| Multi-currency support                                             | No requirement in spec                                                                                                         |
-| Product soft-delete                                                | Better pattern than `ON DELETE RESTRICT` but out of scope                                                                      |
+| Risk                                           | Reason not addressed                                                                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Full JWT / session auth middleware             | Entirely absent from the project; would require route-level changes across all endpoints                                       |
+| `idempotencyKey` format validation             | Belongs at route validation layer (Zod/Joi); out of scope                                                                      |
+| Hardcoded Redis TTLs                           | Low risk for assessment scope; move to env vars in production                                                                  |
+| Rate limiting                                  | Requires `express-rate-limit` dependency; out of scope                                                                         |
+| Helmet security headers                        | Requires `helmet` dependency; out of scope                                                                                     |
+| Unhandled promise rejections in route handlers | All current handlers use try/catch with `next(err)`; a global `asyncWrapper` is a defensive improvement, not an active bug fix |
+| Multi-currency support                         | No requirement in spec                                                                                                         |
+| Product soft-delete                            | Better pattern than `ON DELETE RESTRICT` but out of scope                                                                      |
 
 ---
 
