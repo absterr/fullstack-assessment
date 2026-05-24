@@ -142,6 +142,22 @@ comparing against the stated fix description.
 
 **Fix:** Added `"NX"` as the final argument.
 
+### Case 4: Frontend error handling
+
+The model used a single shared `error` state throughout both `ProductDetailPage`
+and `OrderDetailPage`. A failed action would replace the entire page with an
+error message, losing the user's context entirely.
+
+**How I caught it:** Reviewing the generated JSX and reasoning through the UX
+implications. A payment failure on `OrderDetailPage` would unmount the order
+view, leaving the user with no way to retry or see the order status.
+
+**Fix:** Split into separate states: `fetchError` and `buyError`/`payError`.
+Fetch failures replace the page since there is nothing to render. Action failures
+display inline, preserving the page. Also added `max={product.stock}` on the
+quantity input for HTML-level clamping, and `err instanceof Error` checks for
+safe error extraction instead of `any` casting.
+
 ---
 
 ## 4. Validation strategy
