@@ -59,8 +59,8 @@ export default function ProductsPage() {
         <p>No products found</p>
       ) : (
         <ul className="product-grid">
-          {products.map((p, idx) => (
-            <li key={idx} className="product-card">
+          {products.map((p) => (
+            <li key={p.id} className="product-card">
               <Link to={`/products/${p.id}`}>
                 <h3>{p.name}</h3>
                 <p className="sku">{p.sku}</p>

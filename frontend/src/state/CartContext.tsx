@@ -40,7 +40,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
           productId: product.id,
           name: product.name,
           price: toCents(Number(product.price)),
-          safeQuantity,
+          quantity: safeQuantity,
         },
       ];
     });
