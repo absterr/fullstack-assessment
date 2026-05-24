@@ -6,10 +6,12 @@ const router = express.Router();
 router.post("/", async (req, res, next) => {
   try {
     const { customerId, items, totalAmount } = req.body;
+    const idempotencyKey = req.header("Idempotency-Key");
     const order = await ordersService.createOrder({
       customerId,
       items,
       totalAmount,
+      idempotencyKey,
     });
     res.status(201).json(order);
   } catch (err) {

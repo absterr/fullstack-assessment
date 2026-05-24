@@ -44,13 +44,17 @@ export function getProduct(id: number | string): Promise<Product> {
   return request<Product>(`/products/${id}`);
 }
 
-export function createOrder(body: {
-  customerId: string;
-  items: { productId: number; quantity: number }[];
-  totalAmount: number;
-}): Promise<Order> {
+export function createOrder(
+  body: {
+    customerId: string;
+    items: { productId: number; quantity: number }[];
+    totalAmount: number;
+  },
+  idempotencyKey?: string,
+): Promise<Order> {
   return request<Order>("/orders", {
     method: "POST",
+    headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {},
     body: JSON.stringify(body),
   });
 }

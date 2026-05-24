@@ -43,7 +43,14 @@ function isValidString(str) {
 
 // ─── createOrder ─────────────────────────────────────────────────────────────
 
-async function createOrder({ customerId, items, totalAmount }) {
+async function createOrder({ customerId, items, totalAmount, idempotencyKey }) {
+  if (isValidString(idempotencyKey)) {
+    const cached = await redis.get(`idem:order:${idempotencyKey}`);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  }
+
   if (!isValidString(customerId)) {
     const error = new Error("customerId is not a valid ID");
     error.status = 400;
@@ -154,6 +161,16 @@ async function createOrder({ customerId, items, totalAmount }) {
       },
       client,
     );
+
+    if (idempotencyKey) {
+      await redis.set(
+        `idem:order:${idempotencyKey}`,
+        JSON.stringify(order),
+        "EX",
+        3600,
+        "NX",
+      );
+    }
 
     return order;
   });

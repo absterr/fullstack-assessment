@@ -8,6 +8,7 @@ export default function CartPage() {
   const { items, total, remove, clear } = useCart();
   const navigate = useNavigate();
   const [isChecking, setChecking] = useState(false);
+  const [checkoutKey, setCheckoutKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function checkout() {
@@ -16,16 +17,26 @@ export default function CartPage() {
     setChecking(true);
     setError(null);
 
+    let key = checkoutKey;
+    if (!key) {
+      key = crypto.randomUUID();
+      setCheckoutKey(key);
+    }
+
     try {
-      const order = await createOrder({
-        customerId: "customer_001",
-        items: items.map((i) => ({
-          productId: i.productId,
-          quantity: i.quantity,
-        })),
-        totalAmount: total,
-      });
+      const order = await createOrder(
+        {
+          customerId: "customer_001",
+          items: items.map((i) => ({
+            productId: i.productId,
+            quantity: i.quantity,
+          })),
+          totalAmount: total,
+        },
+        key,
+      );
       clear();
+      setCheckoutKey(null);
       navigate(`/orders/${order.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Checkout failed");
