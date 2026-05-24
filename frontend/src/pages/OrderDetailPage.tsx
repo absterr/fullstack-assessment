@@ -44,6 +44,8 @@ export default function OrderDetailPage() {
     if (!order || isPaying) return;
 
     setPaying(true);
+    setPayError(null);
+
     try {
       const result = await chargeOrder(order!.id);
       setOrder(result.order);

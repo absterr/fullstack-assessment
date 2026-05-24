@@ -32,6 +32,7 @@ export default function ProductDetailPage() {
     }
 
     setBuying(true);
+    setBuyError(null);
 
     try {
       const totalAmount = fromCents(toCents(Number(product.price)) * quantity);
