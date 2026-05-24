@@ -570,23 +570,47 @@
 
 ---
 
+### Issue: No idempotency key on `createOrder` from cart checkout
+
+- **Where:** `frontend/src/pages/CartPage.tsx` — `checkout`; `frontend/src/api.ts` — `createOrder`
+- **Why:** No idempotency key was sent with order creation requests. A network failure after the server processed the request but before the client received the response would cause a retry to create a duplicate order.
+- **Impact:** Duplicate orders on retry, double stock decrement, potential double charge.
+- **Fix:** A `crypto.randomUUID()` key is generated once per checkout attempt and stored in state. It is reused on retries and cleared on success. Passed to `createOrder` in `api.ts` as the `Idempotency-Key` header. Backend caches the response under `idem:order:` namespace.
+- **Trade-offs:** Key is stored in component state — lost on page refresh. A user who refreshes mid-retry would get a new key and a fresh attempt. Acceptable given the narrow retry window.
+
+---
+
 ## Remaining Risks (Frontend)
 
-| Risk                                              | Reason not addressed                                                                                                                                                                             |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Admin token stored in `localStorage`              | Vulnerable to XSS. `VITE_ADMIN_TOKEN` env var fallback removed as it exposes the secret in the client bundle. A `httpOnly` cookie requires backend changes; out of scope.                        |
-| No retry logic with idempotency key reuse         | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                                        |
-| Cart not persisted on page refresh                | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
-| Optimistic cart with no stock reservation         | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout via `SELECT FOR UPDATE`. No frontend fix is possible without a backend reservation system. |
-| Hard-coded `customerId: "customer_001"`           | No user table or auth system exists. Would require full authentication implementation.                                                                                                           |
-| CSRF protection on `buyNow` and `pay`             | Requires server-side session/cookie-based auth. Out of scope.                                                                                                                                    |
-| Optimistic cart with no stock reservation         | Stock is not held when items are added. Backend correctly rejects oversold orders at checkout. No frontend fix possible without a backend reservation system.                                    |
-| Cart not persisted on page refresh                | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
-| No pagination on admin orders and products tables | Backend supports pagination via `limit`/`offset`. Frontend does not implement it. Out of scope given time constraints.                                                                           |
-| No search/filter on admin orders table            | UX improvement, not a correctness issue. Out of scope.                                                                                                                                           |
+| Risk                                              | Reason not addressed                                                                                                                                                      |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Admin token stored in `localStorage`              | Vulnerable to XSS. `VITE_ADMIN_TOKEN` env var fallback removed as it exposes the secret in the client bundle. A `httpOnly` cookie requires backend changes; out of scope. |
+| No retry logic with idempotency key reuse         | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                 |
+| Cart not persisted on page refresh                | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                          |
+| Optimistic cart with no stock reservation         | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout. No frontend fix is possible without a backend reservation system.  |
+| Hard-coded `customerId: "customer_001"`           | No user table or auth system exists. Would require full authentication implementation.                                                                                    |
+| CSRF protection on `buyNow` and `pay`             | Requires server-side session/cookie-based auth. Out of scope.                                                                                                             |
+| No pagination on admin orders and products tables | Backend supports pagination via `limit`/`offset`. Frontend does not implement it. Out of scope given time constraints.                                                    |
+| No search/filter on admin orders table            | UX improvement, not a correctness issue. Out of scope.                                                                                                                    |
 
 ---
 
 ## Cross-cutting
 
-> To be completed.
+### Money handling consistency
+
+- **Where:** `backend/src/services/ordersService.js`, `frontend/src/utils/money.ts`, `frontend/src/state/CartContext.tsx`
+- **Why:** Monetary values are vulnerable to IEEE 754 float drift anywhere arithmetic is performed. Fixing only the backend while leaving the frontend on float arithmetic would still produce mismatches on `totalAmount` submission.
+- **Impact:** Without a consistent approach, backend and frontend could compute different totals for the same cart, causing 422 rejections.
+- **Fix:** Shared `toCents`/`fromCents` pattern applied across both stacks. Backend uses it in `ordersService.js`. Frontend uses the same utility in `CartContext.tsx`, `ProductDetailPage.tsx`, and `CartPage.tsx`. All arithmetic happens in integer cents; conversion to decimal occurs only at storage and display boundaries.
+- **Trade-offs:** Frontend and backend implementations are separate files — a future change to one must be mirrored in the other. A shared library would eliminate this risk in a monorepo setup.
+
+---
+
+### No frontend tests
+
+- **Where:** `frontend/`
+- **Why:** The assessment requires at least one frontend test. Vitest is the standard test runner for Vite projects but is not included in the project's `devDependencies`. Setting it up requires installing Vitest, `@testing-library/react`, `@testing-library/jest-dom`, `jsdom`, configuring `vitest.config.ts`, and adding a setup file — non-trivial overhead given the time constraint.
+- **Impact:** Frontend bug fixes (XSS via `dangerouslySetInnerHTML`, float arithmetic, error handling) are not covered by automated tests.
+- **Fix:** Not implemented. Backend tests cover all three required areas (concurrency, idempotency, auth). Frontend fixes were verified manually.
+- **Trade-offs:** Frontend test coverage is absent. The highest-impact frontend fix (`dangerouslySetInnerHTML` removal) is trivially verifiable by code review — the change is a one-line replacement with no logic to test.
