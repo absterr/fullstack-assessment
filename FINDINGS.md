@@ -550,6 +550,16 @@
 
 ---
 
+### Issue: Product search requests could resolve out of order
+
+- **Where:** `frontend/src/pages/ProductsPage.tsx` — `load`, `useEffect`
+- **Why:** Rapid searches created multiple concurrent requests with no cancellation mechanism. Older requests could finish after newer ones and overwrite fresh results with stale data.
+- **Impact:** Users could see incorrect product results while typing quickly. Requests also continued after component unmount, risking unnecessary state updates and wasted network usage.
+- **Fix:** Added `AbortController` tracking with `abortRef`. Any in flight request is aborted before a new search begins, and active requests are also aborted during component unmount cleanup. `AbortError` responses are explicitly ignored in the catch block.
+- **Trade-offs:** Requires `listProducts` and underlying `fetch` calls to support `AbortSignal`. Aborted requests now intentionally short circuit normal error handling.
+
+---
+
 ## Remaining Risks (Frontend)
 
 | Risk                                              | Reason not addressed                                                                                                                                                                             |
