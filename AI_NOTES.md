@@ -158,6 +158,30 @@ display inline, preserving the page. Also added `max={product.stock}` on the
 quantity input for HTML-level clamping, and `err instanceof Error` checks for
 safe error extraction instead of `any` casting.
 
+### Case 5: Idempotency key generated per call, not per attempt
+
+The model's initial `chargeOrder` implementation in `api.ts` generated a new
+`crypto.randomUUID()` on every call:
+
+```ts
+const idempotencyKey = crypto.randomUUID();
+```
+
+This means a retry after a network failure would send a different key, causing
+the backend to treat it as a fresh charge rather than a duplicate. The
+idempotency guarantee was present in name only.
+
+**How I caught it:** I reasoned through the retry lifecycle. A new key on every
+call means no retry protection at all. The model's own comment stated "reuse
+this key on retries" but the implementation made that impossible.
+
+**Fix:** Key is now generated once per attempt and stored in component state
+(`idempotencyKey` in `OrderDetailPage`, `checkoutKey` in `CartPage`). Reused
+on retries, cleared on success or when the order leaves `PENDING` state.
+`chargeOrder` and `createOrder` in `api.ts` now accept an optional
+`idempotencyKey` parameter, falling back to `crypto.randomUUID()` only when
+not provided.
+
 ---
 
 ## 4. Validation strategy
