@@ -460,18 +460,110 @@
 
 ---
 
+### Issue: Search triggers fetch on every keystroke with no debounce
+
+- **Where:** `frontend/src/pages/ProductsPage.tsx` — `onChange` handler
+- **Why:** `load()` was called directly inside `onChange`, firing a network request on every keystroke. Also called `load()` without passing the current input value, relying on stale `q` state due to async state updates.
+- **Impact:** Rapid keystrokes cause a flood of requests. Responses arriving out of order could overwrite newer results with stale data.
+- **Fix:** Extracted search into `handleSearch(value)` which passes the current value directly to `load(value)`. Debounced via `useRef` with a 300ms delay — only the final keystroke in a burst triggers a fetch.
+- **Trade-offs:** 300ms delay may feel slightly sluggish on fast connections. Acceptable for a search input.
+
+---
+
+### Issue: No error handling for `listProducts` failure
+
+- **Where:** `frontend/src/pages/ProductsPage.tsx` — `load`
+- **Why:** Errors were swallowed with `console.error`, leaving the user with a blank list and no feedback.
+- **Impact:** Users cannot distinguish between an empty catalog and a failed fetch.
+- **Fix:** Added `fetchError` state displayed inline. Empty state also explicitly handled with "No products found".
+- **Trade-offs:** None.
+
+---
+
+### Issue: Array index used as `key` in product and cart lists
+
+- **Where:** `frontend/src/pages/ProductsPage.tsx`, `frontend/src/pages/CartPage.tsx`, `frontend/src/pages/AdminPage.tsx`
+- **Why:** `idx` was used as `key` instead of a stable unique identifier.
+- **Impact:** React cannot correctly reconcile list items when order changes, causing stale renders and incorrect DOM updates.
+- **Fix:** `key={p.id}` for products, `key={item.productId}` for cart items, and for Admin page: `key={o.id}` for orders, `key={p.id}` for products.
+- **Trade-offs:** None.
+
+---
+
+### Issue: `item.price` displayed raw (in cents) without conversion
+
+- **Where:** `frontend/src/pages/CartPage.tsx` — cart item render
+- **Why:** After `CartContext` was updated to store prices in cents, display code still used `item.price.toFixed(2)` directly, showing cent values as dollar amounts.
+- **Impact:** Cart would display e.g. `$1099.00` instead of `$10.99`.
+- **Fix:** Wrapped with `fromCents(item.price)` before display. `fromCents` already returns a 2-decimal value so `.toFixed(2)` is not needed.
+- **Trade-offs:** None.
+
+---
+
+### Issue: No error handling or loading state for checkout
+
+- **Where:** `frontend/src/pages/CartPage.tsx` — `checkout`
+- **Why:** No try/catch around `createOrder`, no disabled state on the checkout button.
+- **Impact:** Failed checkouts showed no feedback. Multiple clicks could submit duplicate orders.
+- **Fix:** Added `isChecking` flag — button disabled while request is in flight. Errors caught and displayed inline.
+- **Trade-offs:** None.
+
+---
+
+### Issue: Optimistic UI update before `updateProductAdmin` confirms
+
+- **Where:** `frontend/src/pages/AdminPage.tsx` — `save`
+- **Why:** State was updated before the API call completed. If the call failed, the UI showed the change as successful.
+- **Impact:** Admin could believe a product update succeeded when it had not, leading to incorrect inventory or pricing displayed.
+- **Fix:** State is updated only after `updateProductAdmin` resolves successfully, using the confirmed response from the server.
+- **Trade-offs:** UI feels slightly less responsive — the product row updates after the round-trip rather than immediately.
+
+---
+
+### Issue: No input validation before submitting product edits
+
+- **Where:** `frontend/src/pages/AdminPage.tsx` — `save`
+- **Why:** No client-side validation on price or stock fields before submitting.
+- **Impact:** Invalid values (negative price, non-integer stock, NaN) could be sent to the server causing errors or incorrect data.
+- **Fix:** Price validated as `>= 0.01` and stock as a non-negative integer before the API call. Per-product `saveError` state displays inline validation messages. Input types changed to `number` with `min` and `step` attributes for HTML-level clamping.
+- **Trade-offs:** `editing` state stores string values from inputs despite being typed as `Partial<Product>` — a type mismatch that works at runtime but is technically unsound. Acceptable for assessment scope.
+
+---
+
+### Issue: No error handling for admin data fetch or save failures
+
+- **Where:** `frontend/src/pages/AdminPage.tsx` — `useEffect`, `save`
+- **Why:** Neither `listOrdersAdmin` nor `listProducts` had error handling. `save` had no catch block.
+- **Impact:** Admin page would appear blank on fetch failure. Save failures gave no feedback.
+- **Fix:** Fetch errors set `fetchError` state shown to the user. Per-product `saveError` state displays save failures inline next to the affected product.
+- **Trade-offs:** None.
+
+---
+
+### Issue: No unauthorized state for missing admin token
+
+- **Where:** `frontend/src/pages/AdminPage.tsx` — `useEffect`
+- **Why:** `getAdminToken()` throws before any fetch if no token is found. This was unhandled, crashing the component.
+- **Impact:** Admin page crashes silently if no token is configured.
+- **Fix:** Catch block checks for both a missing local token (`"No admin token found"`) and a server 401 response. Either condition sets `unauthorized` state, rendering a clear "Unauthorized" message instead of crashing.
+- **Trade-offs:** String matching on the error message is fragile. Acceptable given no custom error class exists.
+
+---
+
 ## Remaining Risks (Frontend)
 
-| Risk                                      | Reason not addressed                                                                                                                                                                             |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Admin token stored in `localStorage`      | Vulnerable to XSS. `VITE_ADMIN_TOKEN` env var fallback removed as it exposes the secret in the client bundle. A `httpOnly` cookie requires backend changes; out of scope.                        |
-| No retry logic with idempotency key reuse | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                                        |
-| Cart not persisted on page refresh        | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
-| Optimistic cart with no stock reservation | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout via `SELECT FOR UPDATE`. No frontend fix is possible without a backend reservation system. |
-| Hard-coded `customerId: "customer_001"`   | No user table or auth system exists. Would require full authentication implementation.                                                                                                           |
-| CSRF protection on `buyNow` and `pay`     | Requires server-side session/cookie-based auth. Out of scope.                                                                                                                                    |
-| Optimistic cart with no stock reservation | Stock is not held when items are added. Backend correctly rejects oversold orders at checkout. No frontend fix possible without a backend reservation system.                                    |
-| Cart not persisted on page refresh        | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
+| Risk                                              | Reason not addressed                                                                                                                                                                             |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Admin token stored in `localStorage`              | Vulnerable to XSS. `VITE_ADMIN_TOKEN` env var fallback removed as it exposes the secret in the client bundle. A `httpOnly` cookie requires backend changes; out of scope.                        |
+| No retry logic with idempotency key reuse         | `chargeOrder` generates a new key per call. A retry-aware wrapper would be needed to reuse the key across actual retries.                                                                        |
+| Cart not persisted on page refresh                | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
+| Optimistic cart with no stock reservation         | Stock is not held when items are added to cart. Backend correctly rejects oversold orders at checkout via `SELECT FOR UPDATE`. No frontend fix is possible without a backend reservation system. |
+| Hard-coded `customerId: "customer_001"`           | No user table or auth system exists. Would require full authentication implementation.                                                                                                           |
+| CSRF protection on `buyNow` and `pay`             | Requires server-side session/cookie-based auth. Out of scope.                                                                                                                                    |
+| Optimistic cart with no stock reservation         | Stock is not held when items are added. Backend correctly rejects oversold orders at checkout. No frontend fix possible without a backend reservation system.                                    |
+| Cart not persisted on page refresh                | UX convenience, not a correctness or security issue. Would require `localStorage` serialization.                                                                                                 |
+| No pagination on admin orders and products tables | Backend supports pagination via `limit`/`offset`. Frontend does not implement it. Out of scope given time constraints.                                                                           |
+| No search/filter on admin orders table            | UX improvement, not a correctness issue. Out of scope.                                                                                                                                           |
 
 ---
 
