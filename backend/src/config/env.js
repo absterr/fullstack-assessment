@@ -27,8 +27,7 @@ module.exports = {
   PAYMENT_FAILURE_RATE: requireNumericEnv("PAYMENT_FAILURE_RATE", 0.1),
   PAYMENT_DELAY_MIN_MS: requireNumericEnv("PAYMENT_DELAY_MIN_MS", 50),
   PAYMENT_DELAY_MAX_MS: requireNumericEnv("PAYMENT_DELAY_MAX_MS", 600),
-  ADMIN_TOKEN: requireEnv("ADMIN_TOKEN", false) || "change-me",
-  FRONTEND_ORIGIN:
-    requireEnv("FRONTEND_ORIGIN", false) || "http://localhost:5173",
-  WEBHOOK_SECRET: requireEnv("WEBHOOK_SECRET", false) || "replace-me",
+  ADMIN_TOKEN: requireEnv("ADMIN_TOKEN"),
+  FRONTEND_ORIGIN: requireEnv("FRONTEND_ORIGIN"),
+  WEBHOOK_SECRET: requireEnv("WEBHOOK_SECRET"),
 };

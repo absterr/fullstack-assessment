@@ -26,17 +26,19 @@ app.use("/products", productsRoutes);
 app.use("/orders", ordersRoutes);
 app.use("/payments", paymentsRoutes);
 
-app.use("/admin", (req, res, next) => {
-  const auth = req.headers["authorization"];
-  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+app.use(
+  "/admin",
+  (req, res, next) => {
+    const auth = req.headers["authorization"];
+    const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
 
-  if (!token || token !== env.ADMIN_TOKEN) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-});
-
-app.use("/admin", adminRoutes);
+    if (!token || token !== env.ADMIN_TOKEN) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+  },
+  adminRoutes,
+);
 
 app.use((error, req, res, next) => {
   console.error("Request failed", error);
